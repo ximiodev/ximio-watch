@@ -175,6 +175,36 @@ monitors:
 Each monitor runs in its own asyncio task. A timeout, connection error or exception
 in one monitor cannot stop the others. Metrics for one execution are recorded once.
 
+### Security and configuration hygiene
+
+`config/monitors.yaml` is a public, fictional example. Private monitor definitions
+belong outside the repository or under ignored paths such as `config/private/`,
+`config/local/`, `config/production/`, `config/monitors.local.*` and
+`config/monitors.production.*`. Sanitized examples may be committed as
+`config/monitors.example.yaml` or `config/monitors.*.example.yaml`. The same private
+patterns are excluded from the Docker context, and the application image copies only
+`config/monitors.yaml`; private runtime configuration is not built into the image.
+
+Credentials should be supplied through environment variables or, in a later runtime
+stage, protected secret files. `${NAME}` and `${NAME:default}` references are
+resolved when configuration is loaded. Do not put private values directly in tracked
+files. Expanded credential values are not written to logs, metrics, spans or
+configuration diagnostics.
+
+Configuration validation reports the affected monitor entry, field path and a static
+problem category. Raw YAML parser and Pydantic values, causes and contexts are
+discarded. Startup logs use the same sanitized diagnostic.
+
+The `secret-scan` workflow runs Gitleaks on pushes and pull requests, and performs a
+full-history scan on schedule and manual dispatch. It uses redacted output, minimal
+`contents: read` permissions, and does not upload reports or post findings as
+comments. No exception is currently needed for the fictional demo values. The
+repository owner is a personal account, so the action does not require a Gitleaks
+license; organization ownership would require one. Workflow results must be checked
+on GitHub; this documentation does not claim that a remote run has passed.
+
+These protections do not make XimioWatch production-ready.
+
 ### Scheduling and timeout behavior
 
 - Scheduling is **fixed-delay**: after a check finishes, the monitor sleeps for
@@ -377,12 +407,15 @@ python -m pytest -q
 Tests use HTTPX mock transports and isolated Prometheus registries; they need no
 Docker, network connection or demonstration API. Coverage includes assertion
 semantics, HTTP/functional/performance separation, latency-only and combined
-failures, exact-once metric recording, sanitized diagnostics, alert rule structure,
-monitor isolation, configuration validation, environment expansion, recovery and
-the direct `/metrics` endpoint.
+failures, exact-once metric recording, sanitized diagnostics, secret-safe
+configuration errors, build-context hygiene, alert rule structure, monitor
+isolation, configuration validation, environment expansion, recovery and the direct
+`/metrics` endpoint.
 
 GitHub Actions runs the same suite on Python 3.12 via
-[`.github/workflows/tests.yml`](.github/workflows/tests.yml).
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml). Secret scanning runs
+separately via
+[`.github/workflows/secret-scan.yml`](.github/workflows/secret-scan.yml).
 
 ## Reproducible demonstration walkthrough
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 AssertionType = Literal[
     "http_status",
@@ -22,6 +22,44 @@ AssertionType = Literal[
 ]
 
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}")
+
+_SAFE_FIELDS = frozenset(
+    {
+        "monitors",
+        "name",
+        "application",
+        "url",
+        "method",
+        "headers",
+        "interval_seconds",
+        "timeout_seconds",
+        "assertions",
+        "type",
+        "path",
+        "value",
+        "when",
+        "then",
+        "otherwise",
+    }
+)
+
+_ERROR_DESCRIPTIONS = {
+    "extra_forbidden": "contains an unsupported field",
+    "greater_than": "must be greater than zero",
+    "int_parsing": "must be an integer",
+    "int_type": "must be an integer",
+    "bool_parsing": "must be a boolean",
+    "bool_type": "must be a boolean",
+    "dict_type": "must be a mapping",
+    "float_parsing": "must be a number",
+    "float_type": "must be a number",
+    "list_type": "must be a list",
+    "literal_error": "has an unsupported value",
+    "missing": "is required",
+    "model_type": "must be an object",
+    "string_too_short": "must not be empty",
+    "string_type": "must be a string",
+}
 
 
 class ConfigurationError(ValueError):
@@ -118,15 +156,68 @@ class MonitorConfig(BaseModel):
         return value.strip().upper()
 
 
+def _safe_location(location: tuple[Any, ...] | list[Any]) -> str:
+    """Return a field path containing only known schema names and list indexes."""
+    result = ""
+    for item in location:
+        if isinstance(item, int) and not isinstance(item, bool):
+            token = f"[{item}]"
+        elif isinstance(item, str) and item in _SAFE_FIELDS:
+            token = item
+        else:
+            token = "<field>"
+        if not result or token.startswith("["):
+            result += token
+        else:
+            result += f".{token}"
+    return result or "<configuration>"
+
+
+def _safe_validation_diagnostics(validation_error: ValidationError) -> str:
+    """Build diagnostics from error categories, never from submitted values."""
+    diagnostics: list[str] = []
+    for error in validation_error.errors():
+        location = _safe_location(error.get("loc", ()))
+        error_type = str(error.get("type", ""))
+        if error_type == "value_error":
+            # Custom validators in this module only emit static, value-free messages.
+            description = str(error.get("msg", "is invalid"))
+        else:
+            description = _ERROR_DESCRIPTIONS.get(error_type, "is invalid")
+        diagnostics.append(f"{location} {description}")
+    return "; ".join(diagnostics) or "invalid definition"
+
+
+def _read_configuration(config_path: Path) -> tuple[Any | None, str | None]:
+    """Read YAML and return a sanitized problem description instead of exceptions."""
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None, "Cannot read configuration file"
+
+    try:
+        return yaml.safe_load(text) or {}, None
+    except yaml.YAMLError:
+        return None, "Configuration file is not valid YAML"
+    except Exception:
+        return None, "Configuration file could not be parsed"
+
+
+def _validate_monitor(item: Any, index: int) -> MonitorConfig:
+    """Validate one monitor without retaining raw exception context."""
+    try:
+        return MonitorConfig.model_validate(item)
+    except ValidationError as validation_error:
+        diagnostics = _safe_validation_diagnostics(validation_error)
+    raise ConfigurationError(f"Invalid monitor at entry #{index + 1}: {diagnostics}")
+
+
 def load_monitors(path: str | Path) -> list[MonitorConfig]:
     """Load and validate monitor definitions from a YAML file."""
     config_path = Path(path)
-    try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    except OSError as exc:
-        raise ConfigurationError(f"Cannot read configuration file: {config_path}") from exc
-    except yaml.YAMLError as exc:
-        raise ConfigurationError("Configuration file is not valid YAML") from exc
+    raw, problem = _read_configuration(config_path)
+    if problem is not None:
+        raise ConfigurationError(problem)
 
     if not isinstance(raw, dict) or not isinstance(raw.get("monitors"), list):
         raise ConfigurationError("Configuration must contain a 'monitors' list")
@@ -136,13 +227,9 @@ def load_monitors(path: str | Path) -> list[MonitorConfig]:
     monitors: list[MonitorConfig] = []
     names: set[str] = set()
     for index, item in enumerate(expand_environment(raw["monitors"])):
-        label = item.get("name", f"#{index + 1}") if isinstance(item, dict) else f"#{index + 1}"
-        try:
-            monitor = MonitorConfig.model_validate(item)
-        except Exception as exc:
-            raise ConfigurationError(f"Invalid monitor '{label}': {exc}") from exc
+        monitor = _validate_monitor(item, index)
         if monitor.name in names:
-            raise ConfigurationError(f"Duplicate monitor name '{monitor.name}'")
+            raise ConfigurationError(f"Duplicate monitor name at entry #{index + 1}")
         names.add(monitor.name)
         monitors.append(monitor)
     return monitors

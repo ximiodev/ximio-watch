@@ -17,6 +17,46 @@ coverage.xml
 .env
 .env.*
 !.env.example
+secrets/
+secret/
+*.secret
+*.secrets
+
+# Private monitor configuration
+config/private/
+config/local/
+config/production/
+config/monitors.local.*
+config/monitors.*.local.*
+config/monitors.production.*
+config/monitors.*.production.*
+config/monitors.*.yaml
+config/monitors.*.yml
+!config/monitors.example.yaml
+!config/monitors.*.example.yaml
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa
+id_ed25519
+
+# Local AI assistant configuration and transcript artifacts
+.claude/
+.cursor/
+.opencode/
+.windsurf/
+CLAUDE.local.md
+AGENTS.local.md
+*.prompt
+*.prompt.md
+*transcript*
+*conversation*
+*session*
 
 # Editors and OS
 .idea/

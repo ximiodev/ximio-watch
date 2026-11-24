@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager, suppress
 
@@ -10,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from .config import load_monitors
+from .config import ConfigurationError, load_monitors
 from .engine import MonitorEngine
 from .metrics import Metrics
 from .telemetry import setup_logging, setup_tracing
@@ -28,6 +29,13 @@ async def lifespan(app: FastAPI):
     engine: MonitorEngine | None = None
     try:
         monitors = load_monitors(_config_path)
+    except ConfigurationError as exc:
+        logging.getLogger(__name__).error(
+            "configuration.load_failed",
+            extra={"error_type": type(exc).__name__, "detail": str(exc)},
+        )
+        raise
+    try:
         engine = MonitorEngine(monitors, metrics)
         app.state.engine = engine
         app.state.monitors = monitors

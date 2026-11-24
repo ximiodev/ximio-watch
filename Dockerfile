@@ -9,7 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ximiowatch/ ./ximiowatch/
-COPY config/ ./config/
+COPY config/monitors.yaml ./config/monitors.yaml
 
 RUN useradd --create-home --shell /usr/sbin/nologin appuser \
     && chown -R appuser:appuser /app

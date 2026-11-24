@@ -10,9 +10,46 @@ htmlcov
 *.log
 .env
 .env.*
+!.env.example
 tests
 pytest.ini
 README.md
 LICENSE
 grafana
 prometheus
+
+# Private monitor configuration
+config/private/
+config/local/
+config/production/
+config/monitors.*.yaml
+config/monitors.*.yml
+!config/monitors.example.yaml
+!config/monitors.*.example.yaml
+
+# Local secrets, keys and certificates
+secrets/
+secret/
+*.secret
+*.secrets
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa
+id_ed25519
+
+# Local AI assistant configuration and transcript artifacts
+.claude/
+.cursor/
+.opencode/
+.windsurf/
+CLAUDE.local.md
+AGENTS.local.md
+*.prompt
+*.prompt.md
+*transcript*
+*conversation*
+*session*
