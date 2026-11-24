@@ -1,0 +1,37 @@
+# Demonstration alerting thresholds only. No notification integration is included.
+groups:
+  - name: ximiowatch-mvp
+    rules:
+      - alert: SilentApplicationFailure
+        expr: |
+          (
+            ximiowatch_http_up == 1
+            and on(monitor, application) (ximiowatch_functional_up == 0)
+            and on(monitor, application)
+              (time() - ximiowatch_last_check_timestamp_seconds
+                < (3 * ximiowatch_monitor_interval_seconds
+                   + ximiowatch_monitor_timeout_seconds + 5))
+            and on() (up{job="ximiowatch"} == 1)
+          )
+        for: 30s
+        labels:
+          severity: warning
+          service: ximiowatch
+        annotations:
+          summary: "Silent application failure on {{ $labels.monitor }}"
+          description: >-
+            HTTP is available but business/content assertions are failing for
+            application {{ $labels.application }}. Measurement is recent and the
+            XimioWatch exporter is scrapeable.
+
+      - alert: XimioWatchUnavailable
+        expr: up{job="ximiowatch"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          service: ximiowatch
+        annotations:
+          summary: "XimioWatch Prometheus target is unavailable"
+          description: >-
+            The ximiowatch scrape target has been down for 30 seconds. Monitor
+            gauges may be stale; do not interpret them as current application health.

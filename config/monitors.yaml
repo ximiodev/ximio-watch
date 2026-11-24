@@ -1,0 +1,75 @@
+# All values are fictional demonstration data.
+# ${VAR} / ${VAR:default} references are resolved from environment variables.
+
+monitors:
+  - name: restaurant_catalog
+    application: demo-kitchen
+    url: "${DEMO_API_URL:http://localhost:8001}/scenarios/restaurant-catalog"
+    method: GET
+    headers:
+      X-Demo-Token: "${DEMO_TOKEN:demo-token}"
+    interval_seconds: 10
+    timeout_seconds: 2
+    assertions:
+      - type: http_status
+        value: 200
+      - type: json_exists
+        path: products
+      - type: json_not_empty
+        path: products
+      - type: json_equals
+        path: status
+        value: ready
+
+  - name: fiscal_authorization
+    application: demo-billing
+    url: "${DEMO_API_URL:http://localhost:8001}/scenarios/fiscal-authorization"
+    method: GET
+    headers:
+      X-Demo-Token: "${DEMO_TOKEN:demo-token}"
+    interval_seconds: 10
+    timeout_seconds: 2
+    assertions:
+      - type: http_status
+        value: 200
+      # Standalone guard: a missing/null/false authorized state must never pass
+      # merely because both conditional branches were skipped.
+      - type: json_equals
+        path: authorized
+        value: true
+      - type: conditional
+        when:
+          type: json_equals
+          path: authorized
+          value: true
+        then:
+          type: json_exists
+          path: authorization_code
+      - type: conditional
+        when:
+          type: json_equals
+          path: authorized
+          value: true
+        then:
+          type: json_not_empty
+          path: authorization_code
+
+  - name: device_data_freshness
+    application: demo-iot
+    url: "${DEMO_API_URL:http://localhost:8001}/scenarios/device-data-freshness"
+    method: GET
+    headers:
+      X-Demo-Token: "${DEMO_TOKEN:demo-token}"
+    interval_seconds: 10
+    timeout_seconds: 2
+    assertions:
+      - type: http_status
+        value: 200
+      - type: json_equals
+        path: status
+        value: online
+      - type: json_exists
+        path: last_event_at
+      - type: numeric_lt
+        path: last_event_age_seconds
+        value: 300

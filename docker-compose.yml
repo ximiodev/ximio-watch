@@ -1,0 +1,57 @@
+services:
+  ximiowatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${XIMIOWATCH_PORT:-8000}:8000"
+    environment:
+      XIMIOWATCH_CONFIG: /app/config/monitors.yaml
+      DEMO_API_URL: http://demo-api:8001
+      DEMO_TOKEN: ${DEMO_TOKEN:-demo-token}
+      OTEL_SERVICE_NAME: ximiowatch
+      # Set OTEL_TRACES_EXPORTER=otlp and OTEL_EXPORTER_OTLP_ENDPOINT to export spans.
+    depends_on:
+      demo-api:
+        condition: service_healthy
+
+  demo-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.demo
+    ports:
+      - "127.0.0.1:${DEMO_API_PORT:-8001}:8001"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+    depends_on:
+      - ximiowatch
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus

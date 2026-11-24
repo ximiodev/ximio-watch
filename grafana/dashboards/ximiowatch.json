@@ -1,0 +1,648 @@
+{
+  "uid": "ximiowatch-mvp",
+  "title": "XimioWatch - Functional Health",
+  "tags": [
+    "ximiowatch",
+    "synthetic-monitoring",
+    "mvp"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "5s",
+  "editable": false,
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "application",
+        "label": "Application",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(ximiowatch_monitor_interval_seconds, application)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "sort": 1,
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Current healthy monitors (%)",
+      "description": "Percentage of configured monitors that are fresh, scrapeable and fully healthy. Unknown monitors are excluded from the numerator.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "noValue": "unknown",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "expr": "count(((ximiowatch_functional_up{application=~\"$application\"} == 1 and on(monitor, application) (time() - ximiowatch_last_check_timestamp_seconds{application=~\"$application\"} < (3 * ximiowatch_monitor_interval_seconds{application=~\"$application\"} + ximiowatch_monitor_timeout_seconds{application=~\"$application\"} + 5))) and on() (up{job=\"ximiowatch\"} == 1) and on(monitor, application) (ximiowatch_performance_configured{application=~\"$application\"} == 0 or (ximiowatch_performance_configured{application=~\"$application\"} == 1 and ximiowatch_performance_up{application=~\"$application\"} == 1)))) / clamp_min(count(ximiowatch_monitor_interval_seconds{application=~\"$application\"}), 1)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Current failing monitors",
+      "description": "Fresh monitors with a failed HTTP, functional or performance check. Scrape failures are not counted as application failures.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "expr": "count(((ximiowatch_http_up{application=~\"$application\"} == 0 or ximiowatch_functional_up{application=~\"$application\"} == 0 or (ximiowatch_performance_configured{application=~\"$application\"} == 1 and ximiowatch_performance_up{application=~\"$application\"} == 0)) and on(monitor, application) (time() - ximiowatch_last_check_timestamp_seconds{application=~\"$application\"} < (3 * ximiowatch_monitor_interval_seconds{application=~\"$application\"} + ximiowatch_monitor_timeout_seconds{application=~\"$application\"} + 5))) and on() (up{job=\"ximiowatch\"} == 1))"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Unknown or stale monitors",
+      "description": "Configured monitors without a recent measurement, or all monitors while the XimioWatch scrape target is down. Last known configuration is retained for 5m.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "expr": "count(last_over_time(ximiowatch_monitor_interval_seconds{application=~\"$application\"}[5m])) - (count((((ximiowatch_functional_up{application=~\"$application\"} == 1 and on(monitor, application) (time() - ximiowatch_last_check_timestamp_seconds{application=~\"$application\"} < (3 * ximiowatch_monitor_interval_seconds{application=~\"$application\"} + ximiowatch_monitor_timeout_seconds{application=~\"$application\"} + 5))) and on() (up{job=\"ximiowatch\"} == 1) and on(monitor, application) (ximiowatch_performance_configured{application=~\"$application\"} == 0 or (ximiowatch_performance_configured{application=~\"$application\"} == 1 and ximiowatch_performance_up{application=~\"$application\"} == 1))) or ((ximiowatch_http_up{application=~\"$application\"} == 0 or ximiowatch_functional_up{application=~\"$application\"} == 0 or (ximiowatch_performance_configured{application=~\"$application\"} == 1 and ximiowatch_performance_up{application=~\"$application\"} == 0)) and on(monitor, application) (time() - ximiowatch_last_check_timestamp_seconds{application=~\"$application\"} < (3 * ximiowatch_monitor_interval_seconds{application=~\"$application\"} + ximiowatch_monitor_timeout_seconds{application=~\"$application\"} + 5))) and on() (up{job=\"ximiowatch\"} == 1))) or vector(0))"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Silent failures (selected range)",
+      "description": "HTTP available while business/content assertions failed in the selected time range.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "expr": "sum(increase(ximiowatch_silent_failures_total{application=~\"$application\"}[$__range]))"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Current monitor state",
+      "description": "Healthy, failing, or unknown/stale per monitor. Unknown uses the last known configuration for 5m and never reports stale health as current.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "unknown",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "expr": "label_replace((((ximiowatch_functional_up{application=~\"$application\"} == 1 and on(monitor, application) (time() - ximiowatch_last_check_timestamp_seconds{application=~\"$application\"} < (3 * ximiowatch_monitor_interval_seconds{application=~\"$application\"} + ximiowatch_monitor_timeout_seconds{application=~\"$application\"} + 5))) and on() (up{job=\"ximiowatch\"} == 1) and on(monitor, application) (ximiowatch_performance_configured{application=~\"$application\"} == 0 or (ximiowatch_performance_configured{application=~\"$application\"} == 1 and ximiowatch_performance_up{application=~\"$application\"} == 1)))) * 0 + 1, \"state\", \"healthy\", \"monitor\", \".+\")"
+        },
+        {
+          "refId": "B",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "expr": "label_replace((((ximiowatch_http_up{application=~\"$application\"} == 0 or ximiowatch_functional_up{application=~\"$application\"} == 0 or (ximiowatch_performance_configured{application=~\"$application\"} == 1 and ximiowatch_performance_up{application=~\"$application\"} == 0)) and on(monitor, application) (time() - ximiowatch_last_check_timestamp_seconds{application=~\"$application\"} < (3 * ximiowatch_monitor_interval_seconds{application=~\"$application\"} + ximiowatch_monitor_timeout_seconds{application=~\"$application\"} + 5))) and on() (up{job=\"ximiowatch\"} == 1)) * 0 + 1, \"state\", \"failing\", \"monitor\", \".+\")"
+        },
+        {
+          "refId": "C",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "expr": "label_replace(last_over_time(ximiowatch_monitor_interval_seconds{application=~\"$application\"}[5m]) * 0 unless on(monitor, application) ((((ximiowatch_functional_up{application=~\"$application\"} == 1 and on(monitor, application) (time() - ximiowatch_last_check_timestamp_seconds{application=~\"$application\"} < (3 * ximiowatch_monitor_interval_seconds{application=~\"$application\"} + ximiowatch_monitor_timeout_seconds{application=~\"$application\"} + 5))) and on() (up{job=\"ximiowatch\"} == 1) and on(monitor, application) (ximiowatch_performance_configured{application=~\"$application\"} == 0 or (ximiowatch_performance_configured{application=~\"$application\"} == 1 and ximiowatch_performance_up{application=~\"$application\"} == 1))) or ((ximiowatch_http_up{application=~\"$application\"} == 0 or ximiowatch_functional_up{application=~\"$application\"} == 0 or (ximiowatch_performance_configured{application=~\"$application\"} == 1 and ximiowatch_performance_up{application=~\"$application\"} == 0)) and on(monitor, application) (time() - ximiowatch_last_check_timestamp_seconds{application=~\"$application\"} < (3 * ximiowatch_monitor_interval_seconds{application=~\"$application\"} + ximiowatch_monitor_timeout_seconds{application=~\"$application\"} + 5))) and on() (up{job=\"ximiowatch\"} == 1))), \"state\", \"unknown/stale\", \"monitor\", \".+\")"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "HTTP, functional and performance history",
+      "description": "Valid historical observations only; missing observations are shown as gaps, not zero.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "HTTP {{monitor}}",
+          "expr": "ximiowatch_http_up{application=~\"$application\"}"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "Functional {{monitor}}",
+          "expr": "ximiowatch_functional_up{application=~\"$application\"}"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "Performance {{monitor}}",
+          "expr": "ximiowatch_performance_up{application=~\"$application\"}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Historical check-based availability (%)",
+      "description": "Averaged observations over the selected range. This is historical availability, not current state.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "HTTP availability",
+          "expr": "avg(avg_over_time(ximiowatch_http_up{application=~\"$application\"}[$__range]))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "Functional availability",
+          "expr": "avg(avg_over_time(ximiowatch_functional_up{application=~\"$application\"}[$__range]))"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Request latency (p95)",
+      "description": "95th percentile of monitored request duration. Only completed HTTP responses are observed.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{monitor}}",
+          "expr": "histogram_quantile(0.95, sum by (le, monitor) (rate(ximiowatch_request_duration_seconds_bucket{application=~\"$application\"}[$__rate_interval])))"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "bargauge",
+      "title": "Assertion failures by monitor",
+      "description": "Count of failed assertions, grouped by monitor and assertion type.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showValue": "always"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{monitor}} / {{type}}",
+          "expr": "sum by (monitor, type) (increase(ximiowatch_assertion_failures_total{application=~\"$application\"}[$__range]))"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Last completed check",
+      "description": "Timestamp of the last completed check, including failed checks. This is the freshness signal.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "never",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Last check"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "expr": "max by (monitor, application) (ximiowatch_last_check_timestamp_seconds{application=~\"$application\"})"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Last fully healthy check",
+      "description": "Timestamp of the most recent check where HTTP, functional and configured performance checks all passed.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "never",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Last success"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "expr": "max by (monitor, application) (ximiowatch_last_success_timestamp_seconds{application=~\"$application\"})"
+        }
+      ]
+    }
+  ]
+}
