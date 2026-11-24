@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -14,6 +16,31 @@ from .assertions import BUSINESS_ASSERTIONS, PERFORMANCE_ASSERTIONS, AssertionCo
 from .config import MonitorConfig
 from .metrics import Metrics
 from .result import CheckResult
+
+ClientFactory = Callable[[MonitorConfig], httpx.AsyncClient]
+
+_RESPONSE_TOO_LARGE = "response_too_large"
+
+
+class ResponseTooLarge(Exception):
+    """Raised when a decoded response body exceeds the configured limit."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__("response body exceeded the configured limit")
+        self.status_code = status_code
+
+
+class _BorrowedTransport(httpx.AsyncBaseTransport):
+    """Use an injected test transport without taking ownership of it."""
+
+    def __init__(self, transport: httpx.AsyncBaseTransport) -> None:
+        self._transport = transport
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return await self._transport.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        return None
 
 
 def _performance_configured(monitor: MonitorConfig) -> bool:
@@ -45,19 +72,61 @@ def _error_result(
     )
 
 
+def _status_ok(monitor: MonitorConfig, status_code: int) -> bool:
+    """Apply explicit status assertions or the default 2xx-only status policy."""
+    status_assertions = [
+        assertion for assertion in monitor.assertions if assertion.type == "http_status"
+    ]
+    if status_assertions:
+        return all(assertion.value == status_code for assertion in status_assertions)
+    return 200 <= status_code < 300
+
+
+def _oversized_result(
+    monitor: MonitorConfig,
+    status_code: int,
+    elapsed: float,
+    consecutive_failures: int,
+) -> CheckResult:
+    """Report an oversized response as an execution failure, not a transport error."""
+    http_ok = _status_ok(monitor, status_code)
+    failed_types = (_RESPONSE_TOO_LARGE,)
+    if not http_ok:
+        failed_types = (_RESPONSE_TOO_LARGE, "http_status")
+    return CheckResult(
+        monitor=monitor.name,
+        application=monitor.application,
+        status_code=status_code,
+        elapsed_seconds=elapsed,
+        http_ok=http_ok,
+        functional_ok=False,
+        failed_types=failed_types,
+        outcome=_RESPONSE_TOO_LARGE,
+        error_type="ResponseTooLarge",
+        business_failed_types=(),
+        performance_configured=_performance_configured(monitor),
+        performance_ok=None,
+        consecutive_failures=consecutive_failures + 1,
+    )
+
+
 def _evaluate_response(
-    monitor: MonitorConfig, response: httpx.Response, elapsed: float, consecutive_failures: int
+    monitor: MonitorConfig,
+    status_code: int,
+    body: bytes,
+    elapsed: float,
+    consecutive_failures: int,
 ) -> CheckResult:
     payload: Any = None
     json_valid = False
     try:
-        payload = response.json()
+        payload = json.loads(body)
         json_valid = True
     except (ValueError, UnicodeDecodeError):
         pass
 
     context = AssertionContext(
-        status_code=response.status_code,
+        status_code=status_code,
         elapsed_seconds=elapsed,
         payload=payload,
         json_valid=json_valid,
@@ -71,8 +140,8 @@ def _evaluate_response(
     if status_results:
         http_ok = all(result.passed for result in status_results)
     else:
-        # Default status behavior: 2xx and 3xx are HTTP-available.
-        http_ok = 200 <= response.status_code < 400
+        # Default status behavior: only 2xx responses are considered available.
+        http_ok = 200 <= status_code < 300
         if not http_ok:
             failed_types = tuple(dict.fromkeys((*failed_types, "http_status")))
 
@@ -112,7 +181,7 @@ def _evaluate_response(
     return CheckResult(
         monitor=monitor.name,
         application=monitor.application,
-        status_code=response.status_code,
+        status_code=status_code,
         elapsed_seconds=elapsed,
         http_ok=http_ok,
         functional_ok=functional_ok,
@@ -125,24 +194,58 @@ def _evaluate_response(
     )
 
 
-async def check_monitor(
-    monitor: MonitorConfig,
-    client: httpx.AsyncClient,
-    *,
-    metrics: Metrics | None = None,
-    consecutive_failures: int = 0,
+async def _read_bounded_body(response: httpx.Response, limit: int) -> bytes:
+    """Consume a decoded response in bounded chunks, stopping at the first breach."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit:
+            raise ResponseTooLarge(response.status_code)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _execute_check(
+    monitor: MonitorConfig, client: httpx.AsyncClient, consecutive_failures: int
 ) -> CheckResult:
-    """Execute one monitor check. Request errors never escape as exceptions."""
     started = time.monotonic()
     try:
-        response = await client.request(
-            monitor.method,
-            monitor.url,
-            headers=monitor.headers or None,
-            timeout=monitor.timeout_seconds,
+        # Each engine client belongs to one monitor. Clearing its jar here prevents
+        # cookies received during one check from affecting the next independent one.
+        client.cookies.clear()
+        async with asyncio.timeout(monitor.timeout_seconds):
+            async with client.stream(
+                monitor.method,
+                monitor.url,
+                headers=monitor.headers or None,
+                timeout=httpx.Timeout(monitor.timeout_seconds),
+                follow_redirects=False,
+            ) as response:
+                body = await _read_bounded_body(response, monitor.max_response_bytes)
+                elapsed = time.monotonic() - started
+                return _evaluate_response(
+                    monitor, response.status_code, body, elapsed, consecutive_failures
+                )
+    except asyncio.TimeoutError:
+        return _error_result(
+            monitor,
+            time.monotonic() - started,
+            "timeout",
+            "TimeoutError",
+            consecutive_failures + 1,
+        )
+    except ResponseTooLarge as exc:
+        return _oversized_result(
+            monitor,
+            exc.status_code,
+            time.monotonic() - started,
+            consecutive_failures,
         )
     except httpx.TimeoutException as exc:
-        result = _error_result(
+        return _error_result(
             monitor,
             time.monotonic() - started,
             "timeout",
@@ -150,7 +253,7 @@ async def check_monitor(
             consecutive_failures + 1,
         )
     except httpx.RequestError as exc:
-        result = _error_result(
+        return _error_result(
             monitor,
             time.monotonic() - started,
             "connection_error",
@@ -158,25 +261,31 @@ async def check_monitor(
             consecutive_failures + 1,
         )
     except Exception as exc:  # keep one broken monitor from affecting the others
-        result = _error_result(
+        return _error_result(
             monitor,
             time.monotonic() - started,
             "error",
             type(exc).__name__,
             consecutive_failures + 1,
         )
-    else:
-        result = _evaluate_response(
-            monitor, response, time.monotonic() - started, consecutive_failures
-        )
 
+
+async def check_monitor(
+    monitor: MonitorConfig,
+    client: httpx.AsyncClient,
+    *,
+    metrics: Metrics | None = None,
+    consecutive_failures: int = 0,
+) -> CheckResult:
+    """Execute one monitor check. Cancellation is never converted into a result."""
+    result = await _execute_check(monitor, client, consecutive_failures)
     if metrics is not None:
         metrics.record(result)
     return result
 
 
 class MonitorEngine:
-    """Runs every monitor in its own independent asyncio task."""
+    """Runs every monitor in its own task with an independently owned client."""
 
     def __init__(
         self,
@@ -184,6 +293,7 @@ class MonitorEngine:
         metrics: Metrics,
         *,
         client: httpx.AsyncClient | None = None,
+        client_factory: ClientFactory | None = None,
         logger: logging.Logger | None = None,
         tracer: Tracer | None = None,
     ) -> None:
@@ -191,8 +301,32 @@ class MonitorEngine:
         self.metrics = metrics
         self.logger = logger or logging.getLogger("ximiowatch")
         self._tracer = tracer
-        self._owns_client = client is None
-        self.client = client or httpx.AsyncClient(follow_redirects=False, trust_env=False)
+
+        if client_factory is not None:
+            factory = client_factory
+        elif client is not None:
+            # Existing mock-transport injection stays useful, but each monitor still
+            # gets its own cookie jar and the injected client keeps its ownership.
+            template = client
+            transport = _BorrowedTransport(template._transport)
+
+            def factory(monitor: MonitorConfig) -> httpx.AsyncClient:
+                return httpx.AsyncClient(
+                    headers=template.headers,
+                    transport=transport,
+                    follow_redirects=False,
+                    trust_env=False,
+                )
+
+        else:
+
+            def factory(monitor: MonitorConfig) -> httpx.AsyncClient:
+                return httpx.AsyncClient(follow_redirects=False, trust_env=False)
+
+        self._clients: dict[str, httpx.AsyncClient] = {
+            monitor.name: factory(monitor) for monitor in monitors
+        }
+
         self._consecutive_failures: dict[str, int] = {}
         self._closed = False
         self.metrics.configure(monitors)
@@ -212,7 +346,7 @@ class MonitorEngine:
             try:
                 result = await check_monitor(
                     monitor,
-                    self.client,
+                    self._clients[monitor.name],
                     metrics=self.metrics,
                     consecutive_failures=self._consecutive_failures.get(monitor.name, 0),
                 )
@@ -301,9 +435,10 @@ class MonitorEngine:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def aclose(self) -> None:
-        """Close resources owned by this engine. Safe to call more than once."""
+        """Close every client owned by this engine. Safe to call more than once."""
         if self._closed:
             return
         self._closed = True
-        if self._owns_client:
-            await self.client.aclose()
+        await asyncio.gather(
+            *(client.aclose() for client in self._clients.values()), return_exceptions=True
+        )

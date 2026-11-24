@@ -24,6 +24,7 @@ KNOWN_ASSERTION_TYPES = frozenset(
         "timeout",
         "connection_error",
         "error",
+        "response_too_large",
         "unknown",
     }
 )
@@ -36,6 +37,7 @@ KNOWN_OUTCOMES = frozenset(
         "timeout",
         "connection_error",
         "error",
+        "response_too_large",
     }
 )
 
@@ -77,7 +79,7 @@ class Metrics:
         )
         self.monitor_timeout_seconds = Gauge(
             f"{prefix}_monitor_timeout_seconds",
-            "Configured HTTPX operation timeout, in seconds",
+            "Configured absolute request deadline, in seconds",
             MONITOR_LABELS,
             registry=self.registry,
         )

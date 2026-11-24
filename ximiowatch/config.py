@@ -6,7 +6,9 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
+import httpx
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -33,6 +35,7 @@ _SAFE_FIELDS = frozenset(
         "headers",
         "interval_seconds",
         "timeout_seconds",
+        "max_response_bytes",
         "assertions",
         "type",
         "path",
@@ -136,6 +139,36 @@ class Assertion(BaseModel):
 Assertion.model_rebuild()
 
 
+def _validate_url(value: str) -> str:
+    """Validate an operator-supplied URL without retaining its value in errors."""
+    candidate = value.strip()
+    if not candidate:
+        raise ValueError("must not be empty")
+    if any(character.isspace() for character in candidate):
+        raise ValueError("must not contain whitespace")
+
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        raise ValueError("must be a valid HTTP or HTTPS URL") from None
+
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise ValueError("must use HTTP or HTTPS")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("must not contain embedded credentials")
+    if not parsed.hostname:
+        raise ValueError("must contain a hostname")
+
+    try:
+        # Accessing port and constructing httpx.URL rejects malformed hosts,
+        # ports and IPv6 literals without relying on the raw value in errors.
+        _ = parsed.port
+        httpx.URL(candidate)
+    except (ValueError, httpx.InvalidURL):
+        raise ValueError("must be a valid HTTP or HTTPS URL") from None
+    return candidate
+
+
 class MonitorConfig(BaseModel):
     """Definition of a single synthetic monitor."""
 
@@ -143,17 +176,23 @@ class MonitorConfig(BaseModel):
 
     name: str = Field(min_length=1)
     application: str = Field(min_length=1)
-    url: str = Field(min_length=1)
-    method: str = "GET"
+    url: str
+    method: Literal["GET", "HEAD"] = "GET"
     headers: dict[str, str] = Field(default_factory=dict)
     interval_seconds: float = Field(default=10, gt=0)
     timeout_seconds: float = Field(default=2, gt=0)
+    max_response_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
     assertions: list[Assertion] = Field(default_factory=list)
 
-    @field_validator("method")
+    @field_validator("method", mode="before")
     @classmethod
-    def normalize_method(cls, value: str) -> str:
-        return value.strip().upper()
+    def normalize_method(cls, value: Any) -> Any:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return _validate_url(value)
 
 
 def _safe_location(location: tuple[Any, ...] | list[Any]) -> str:

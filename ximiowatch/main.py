@@ -40,8 +40,7 @@ async def lifespan(app: FastAPI):
         app.state.engine = engine
         app.state.monitors = monitors
 
-        await engine.check_all()
-        _task = asyncio.create_task(engine.run(immediate=False))
+        _task = asyncio.create_task(engine.run(immediate=True))
         yield
     finally:
         if _task is not None:

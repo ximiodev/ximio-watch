@@ -66,7 +66,7 @@ are shown as unknown/stale, not healthy and not application-down.
 ```
 config/monitors.yaml ──► MonitorEngine (asyncio, one task per monitor)
                               │
-                              ├─► HTTPX request ──► target application
+                              ├─► per-monitor HTTPX client ──► target application
                               ├─► Assertion engine (JSON paths, no eval)
                               ├─► Prometheus metrics ──► /metrics ──► Prometheus ──► Grafana
                               ├─► Prometheus alert rules (/alerts)
@@ -161,6 +161,7 @@ monitors:
       X-Demo-Token: "${DEMO_TOKEN:demo-token}"
     interval_seconds: 10
     timeout_seconds: 2
+    max_response_bytes: 2097152  # 2 MiB decoded body limit (default)
     assertions:
       - type: http_status
         value: 200
@@ -205,17 +206,71 @@ on GitHub; this documentation does not claim that a remote run has passed.
 
 These protections do not make XimioWatch production-ready.
 
-### Scheduling and timeout behavior
+### Startup and initial state
+
+- Service startup starts monitor execution in a background task; it no longer waits
+  for the first execution of every configured monitor.
+- `/healthz` and `/metrics` are therefore available independently of slow targets.
+- Known monitors are still identified by `ximiowatch_monitor_interval_seconds`,
+  `ximiowatch_monitor_timeout_seconds`, `ximiowatch_performance_configured` and
+  `/monitors`.
+- Before a monitor's first completed check, no `ximiowatch_http_up`,
+  `ximiowatch_functional_up` or `ximiowatch_last_check_timestamp_seconds`
+  observation exists for it. This means **unknown / not yet evaluated**, never
+  healthy.
+- Shutdown cancels monitor tasks, awaits their completion and closes clients owned
+  by the engine. An active streamed response is released during cancellation.
+
+### Scheduling and absolute deadlines
 
 - Scheduling is **fixed-delay**: after a check finishes, the monitor sleeps for
   `interval_seconds`. The effective period is `interval_seconds + check duration`;
   a slow target reduces check frequency. There is no drift compensation.
-- `timeout_seconds` is passed to HTTPX as an operation timeout (connect, read,
-  write and pool), **not** a total wall-clock budget. A slow-drip response can
-  exceed it in aggregate.
+- `timeout_seconds` is now a **total wall-clock deadline** for the full request
+  lifecycle: connection establishment, request transmission, response headers and
+  response body streaming. It is enforced with Python 3.12 `asyncio.timeout`.
+- HTTPX connect/read/write/pool timeouts are also bounded by `timeout_seconds`, but
+  the absolute asyncio deadline remains authoritative even if a transport or a
+  slow-drip response would otherwise exceed the aggregate budget.
+- A deadline expiry produces the bounded `timeout` outcome. External task
+  cancellation is a different event: it is re-raised, never converted into a
+  successful or failed check, and never recorded as a completed check.
 - Freshness evaluation uses a conservative threshold of
   `3 * interval_seconds + timeout_seconds + 5s` (the trailing 5 seconds accounts
-  for the Prometheus scrape interval).
+  for the Prometheus scrape interval). This remains valid because the timeout is
+  now an absolute bound rather than a per-operation limit.
+
+### HTTP execution safety
+
+- Supported methods are **GET and HEAD only**. Other methods are rejected during
+  configuration validation. There are no exceptions for state-changing endpoints.
+- GET and HEAD alone cannot guarantee that an application endpoint is free of side
+  effects. Operators must review the contract of every configured target.
+- URLs must use HTTP or HTTPS, contain a valid hostname and contain no embedded
+  username or password. Malformed URLs and unsupported schemes are rejected.
+  Docker service names, loopback addresses and private-network targets remain
+  valid because operator-configured internal monitoring is supported.
+- Automatic redirects stay disabled for every request. By default only 2xx
+  responses are healthy; unexpected 3xx responses are failures. An explicit
+  `http_status` assertion can deliberately accept another code. No authorization
+  header or cookie is forwarded to a redirect destination because no redirect is
+  followed.
+- HTTPS certificate verification remains enabled. There is no TLS-disable option.
+  Environment proxy discovery remains disabled (`trust_env=False`).
+- Each monitor owns its HTTPX client, preserving connection pooling and keep-alive
+  reuse inside that monitor. Cookies are cleared before each check, so cookies
+  received during one check cannot affect the next check or another monitor. There
+  is no shared global cookie jar to clear concurrently and no browser session
+  management.
+- Response bodies are streamed and counted while being decoded. The configurable
+  `max_response_bytes` limit defaults to **2 MiB of decoded body data**.
+  `Content-Length` is never trusted as the enforcement mechanism; compressed
+  responses are measured after decoding. When the limit is exceeded, consumption
+  stops, the response is closed and the check records the bounded
+  `response_too_large` outcome. If the expected status was already received,
+  `http_ok` remains true while `functional_ok` is false; the failure is never
+  mislabeled as a transport connection error.
+- Response bodies are never logged, recorded in metrics or added to spans.
 
 ### Supported assertions
 
@@ -266,10 +321,11 @@ this, the fiscal demonstration monitor also has a standalone
 `json_equals path: authorized value: true` assertion so a missing, null or `false`
 authorization state can never pass merely because both branches were skipped.
 
-If no `http_status` assertion is configured, any 2xx/3xx response counts as HTTP
-available; other responses are HTTP failures. Functional health always requires
-HTTP health first, so a 5xx response can never be functionally healthy even when
-the JSON body otherwise looks valid.
+If no `http_status` assertion is configured, only a 2xx response counts as HTTP
+available; 3xx and other responses are HTTP failures. An explicit `http_status`
+assertion remains authoritative and may intentionally accept a non-2xx code.
+Functional health always requires HTTP health first, so a 5xx response can never
+be functionally healthy even when the JSON body otherwise looks valid.
 
 ## Metrics
 
@@ -284,8 +340,8 @@ or application field values are exported.
 | `ximiowatch_performance_up` | Gauge | `1` when configured latency thresholds passed; absent when none configured |
 | `ximiowatch_performance_configured` | Gauge | `1` when a `max_response_time` assertion is configured |
 | `ximiowatch_monitor_interval_seconds` | Gauge | Configured fixed delay between completed checks |
-| `ximiowatch_monitor_timeout_seconds` | Gauge | Configured HTTPX operation timeout |
-| `ximiowatch_checks_total` | Counter | Executions by `outcome` (`success`, `functional_failure`, `performance_failure`, `http_failure`, `timeout`, `connection_error`, `error`) |
+| `ximiowatch_monitor_timeout_seconds` | Gauge | Configured absolute request deadline |
+| `ximiowatch_checks_total` | Counter | Executions by `outcome` (`success`, `functional_failure`, `performance_failure`, `http_failure`, `timeout`, `connection_error`, `error`, `response_too_large`) |
 | `ximiowatch_assertion_failures_total` | Counter | Failures by assertion `type` |
 | `ximiowatch_silent_failures_total` | Counter | HTTP available + business/content assertion failure only |
 | `ximiowatch_request_duration_seconds` | Histogram | Duration of completed HTTP responses |
@@ -295,6 +351,11 @@ or application field values are exported.
 
 Notes:
 
+- Each completed check updates these metrics exactly once. A cancelled check is not
+  a completed check and is not recorded.
+- `response_too_large` is a bounded execution outcome. It can coexist with
+  `http_ok = 1` when the expected status was received, but `functional_ok` is
+  always `0`.
 - A configured performance check with no valid latency measurement (for example a
   timeout) records `performance_up = 0`; it is not reported healthy.
 - Counters and gauges are in-process and reset when XimioWatch restarts. Prometheus
@@ -404,13 +465,16 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-Tests use HTTPX mock transports and isolated Prometheus registries; they need no
-Docker, network connection or demonstration API. Coverage includes assertion
-semantics, HTTP/functional/performance separation, latency-only and combined
-failures, exact-once metric recording, sanitized diagnostics, secret-safe
-configuration errors, build-context hygiene, alert rule structure, monitor
-isolation, configuration validation, environment expansion, recovery and the direct
-`/metrics` endpoint.
+Tests use HTTPX mock transports, controlled streams and isolated Prometheus
+registries; they need no Docker, network connection or demonstration API. Coverage
+includes assertion semantics, HTTP/functional/performance separation, latency-only
+and combined failures, absolute deadlines, slow and header-stage timeouts, bounded
+and decoded response-size enforcement, response cleanup, cookie isolation,
+external-cancellation propagation, redirect behavior, exact-once metric recording,
+sanitized diagnostics, secret-safe configuration errors, method/URL validation,
+background startup, initial unknown state, graceful shutdown, build-context hygiene,
+alert rule structure, monitor isolation, environment expansion, recovery and the
+direct `/metrics` endpoint.
 
 GitHub Actions runs the same suite on Python 3.12 via
 [`.github/workflows/tests.yml`](.github/workflows/tests.yml). Secret scanning runs
@@ -435,7 +499,10 @@ separately via
 ## Current limitations
 
 - Polling only; fixed-delay scheduling is not drift-compensated.
-- HTTPX timeouts are per operation, not a total request budget.
+- GET/HEAD cannot prove that an endpoint has no side effects; operators must review
+  target endpoint contracts.
+- The body limit applies to decoded response data, but JSON parsing still occurs in
+  memory after a response passes the limit check.
 - No notification channels; Prometheus alerts are visible only in `/alerts`.
 - No database, authentication, user management, custom frontend or multi-tenancy.
 - No Kubernetes, Terraform or cloud deployment.
