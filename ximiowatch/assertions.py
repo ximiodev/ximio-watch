@@ -2,24 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Literal
 
-from .config import Assertion
+from .config import (
+    Assertion,
+    BUSINESS_ASSERTIONS,
+    CONTENT_ASSERTIONS,
+    JSON_ASSERTIONS,
+    PERFORMANCE_ASSERTIONS,
+    TEXT_ASSERTIONS,
+)
+
+CONTENT_ASSERTIONS = frozenset(CONTENT_ASSERTIONS)
+BUSINESS_ASSERTIONS = frozenset(BUSINESS_ASSERTIONS)
+PERFORMANCE_ASSERTIONS = frozenset(PERFORMANCE_ASSERTIONS)
+TEXT_ASSERTIONS = frozenset(TEXT_ASSERTIONS)
+JSON_ASSERTIONS = frozenset(JSON_ASSERTIONS)
 
 _MISSING = object()
-
-BUSINESS_ASSERTIONS = frozenset(
-    {
-        "json_exists",
-        "json_equals",
-        "json_not_empty",
-        "numeric_gt",
-        "numeric_lt",
-    }
-)
-PERFORMANCE_ASSERTIONS = frozenset({"max_response_time"})
-JSON_ASSERTIONS = frozenset(BUSINESS_ASSERTIONS | PERFORMANCE_ASSERTIONS)
 
 
 @dataclass(frozen=True)
@@ -28,13 +29,30 @@ class AssertionContext:
     elapsed_seconds: float
     payload: Any = None
     json_valid: bool = False
+    text: str | None = None
+    text_decodable: bool = False
+    content_type: str | None = None
 
 
 @dataclass(frozen=True)
 class AssertionResult:
     passed: bool
     type: str
-    detail: str = ""
+    role: Literal["guard", "required"] = "required"
+
+
+@dataclass(frozen=True)
+class Evaluation:
+    """Executed assertions and whether any required check was incomplete.
+
+    `results` contains only required assertions. `all_results` also contains
+    executed guards so latency observations used for branching are not lost.
+    """
+
+    results: tuple[AssertionResult, ...] = ()
+    all_results: tuple[AssertionResult, ...] = ()
+    incomplete: bool = False
+    incomplete_types: frozenset[str] = frozenset()
 
 
 def resolve_path(payload: Any, path: str) -> Any:
@@ -86,6 +104,22 @@ def evaluate_one(assertion: Assertion, context: AssertionContext) -> AssertionRe
             and not isinstance(limit, bool)
             and context.elapsed_seconds <= limit
         )
+    elif kind == "content_type_contains":
+        expected = assertion.value
+        actual = context.content_type
+        passed = (
+            isinstance(expected, str)
+            and bool(expected)
+            and actual is not None
+            and expected.casefold() in actual.casefold()
+        )
+    elif kind in TEXT_ASSERTIONS:
+        expected = assertion.value
+        passed = (
+            isinstance(expected, str)
+            and context.text is not None
+            and (expected in context.text if kind == "text_contains" else expected not in context.text)
+        )
     elif not context.json_valid:
         passed = False
     else:
@@ -110,22 +144,68 @@ def evaluate_one(assertion: Assertion, context: AssertionContext) -> AssertionRe
     return AssertionResult(passed=passed, type=kind)
 
 
+def evaluate_detailed(
+    assertions: Assertion | list[Assertion], context: AssertionContext
+) -> Evaluation:
+    """Evaluate assertions recursively, separating guards from required checks."""
+
+    def walk(item: Assertion, role: Literal["guard", "required"]) -> Evaluation:
+        if item.type != "conditional":
+            # An unevaluable required body check is not a pass and not a failure.
+            if item.type in JSON_ASSERTIONS and not context.json_valid:
+                return Evaluation(incomplete=True, incomplete_types=frozenset({item.type}))
+            if item.type in TEXT_ASSERTIONS and not context.text_decodable:
+                return Evaluation(incomplete=True, incomplete_types=frozenset({item.type}))
+            result = replace(evaluate_one(item, context), role=role)
+            if role == "guard":
+                return Evaluation(all_results=(result,))
+            return Evaluation(results=(result,), all_results=(result,))
+
+        guard = walk(item.when, "guard") if item.when is not None else Evaluation()
+        # An empty guard is not a successful guard; all([]) must never enable then.
+        guard_passed = (
+            bool(guard.all_results)
+            and not guard.incomplete
+            and all(result.passed for result in guard.all_results)
+        )
+        if guard.incomplete:
+            return Evaluation(
+                all_results=guard.all_results,
+                incomplete=True,
+                incomplete_types=guard.incomplete_types,
+            )
+        branch = item.then if guard_passed else item.otherwise
+        if branch is None:
+            return Evaluation(all_results=guard.all_results)
+        selected = walk(branch, role)
+        return Evaluation(
+            results=selected.results,
+            all_results=(*guard.all_results, *selected.all_results),
+            incomplete=selected.incomplete,
+            incomplete_types=selected.incomplete_types,
+        )
+
+    items = [assertions] if isinstance(assertions, Assertion) else assertions
+    required: list[AssertionResult] = []
+    executed: list[AssertionResult] = []
+    incomplete = False
+    incomplete_types: set[str] = set()
+    for item in items:
+        evaluation = walk(item, "required")
+        required.extend(evaluation.results)
+        executed.extend(evaluation.all_results)
+        incomplete = incomplete or evaluation.incomplete
+        incomplete_types.update(evaluation.incomplete_types)
+    return Evaluation(
+        results=tuple(required),
+        all_results=tuple(executed),
+        incomplete=incomplete,
+        incomplete_types=frozenset(incomplete_types),
+    )
+
+
 def evaluate(
     assertions: Assertion | list[Assertion], context: AssertionContext
 ) -> list[AssertionResult]:
-    """Evaluate assertions, including conditional branches."""
-    items = [assertions] if isinstance(assertions, Assertion) else assertions
-    results: list[AssertionResult] = []
-    for assertion in items:
-        if assertion.type != "conditional":
-            results.append(evaluate_one(assertion, context))
-            continue
-
-        if assertion.when is None:  # Prevented by config validation; kept defensive.
-            continue
-        guard_results = evaluate([assertion.when], context)
-        guard_passed = all(result.passed for result in guard_results)
-        branch = assertion.then if guard_passed else assertion.otherwise
-        if branch is not None:
-            results.extend(evaluate([branch], context))
-    return results
+    """Evaluate required assertions, including selected conditional branches."""
+    return list(evaluate_detailed(assertions, context).results)

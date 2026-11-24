@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -20,8 +20,27 @@ AssertionType = Literal[
     "json_not_empty",
     "numeric_gt",
     "numeric_lt",
+    "text_contains",
+    "text_not_contains",
+    "content_type_contains",
     "conditional",
 ]
+
+JSON_ASSERTIONS = frozenset(
+    {
+        "json_exists",
+        "json_equals",
+        "json_not_empty",
+        "numeric_gt",
+        "numeric_lt",
+    }
+)
+TEXT_ASSERTIONS = frozenset({"text_contains", "text_not_contains"})
+CONTENT_TYPE_ASSERTIONS = frozenset({"content_type_contains"})
+CONTENT_ASSERTIONS = frozenset(TEXT_ASSERTIONS | CONTENT_TYPE_ASSERTIONS)
+BUSINESS_ASSERTIONS = frozenset(JSON_ASSERTIONS | CONTENT_ASSERTIONS)
+PERFORMANCE_ASSERTIONS = frozenset({"max_response_time"})
+BODY_ASSERTIONS = frozenset(JSON_ASSERTIONS | TEXT_ASSERTIONS)
 
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}")
 
@@ -89,6 +108,18 @@ def expand_environment(value: Any) -> Any:
     return value
 
 
+def _contains_type(assertion: Assertion, types: frozenset[str]) -> bool:
+    """Report whether an assertion tree contains one of the requested types."""
+    if assertion.type in types:
+        return True
+    if assertion.type != "conditional":
+        return False
+    for child in (assertion.when, assertion.then, assertion.otherwise):
+        if child is not None and _contains_type(child, types):
+            return True
+    return False
+
+
 class Assertion(BaseModel):
     """One assertion. Conditional assertions contain nested assertions."""
 
@@ -104,13 +135,7 @@ class Assertion(BaseModel):
     @model_validator(mode="after")
     def validate_for_type(self) -> Assertion:
         kind = self.type
-        needs_path = kind in {
-            "json_exists",
-            "json_equals",
-            "json_not_empty",
-            "numeric_gt",
-            "numeric_lt",
-        }
+        needs_path = kind in JSON_ASSERTIONS
         needs_value = kind in {
             "http_status",
             "max_response_time",
@@ -131,12 +156,73 @@ class Assertion(BaseModel):
             isinstance(self.value, bool) or not isinstance(self.value, (int, float))
         ):
             raise ValueError(f"'{kind}' requires a numeric 'value'")
-        if kind == "conditional" and (self.when is None or self.then is None):
-            raise ValueError("'conditional' requires 'when' and 'then'")
+        if kind in CONTENT_ASSERTIONS:
+            if not isinstance(self.value, str) or not self.value.strip():
+                raise ValueError(f"'{kind}' requires a non-empty string 'value'")
+            if self.path is not None:
+                raise ValueError(f"'{kind}' does not accept 'path'")
+        if kind != "conditional" and (
+            self.when is not None or self.then is not None or self.otherwise is not None
+        ):
+            raise ValueError("only 'conditional' may define nested branches")
+        if kind == "conditional":
+            if self.when is None or self.then is None:
+                raise ValueError("'conditional' requires 'when' and 'then'")
+            if self.path is not None or self.value is not None:
+                raise ValueError("'conditional' does not accept 'path' or 'value'")
+            for child in (self.when, self.then, self.otherwise):
+                if child is not None and _contains_type(child, frozenset({"http_status"})):
+                    raise ValueError("'http_status' is not supported inside a conditional")
         return self
 
 
 Assertion.model_rebuild()
+
+
+def iter_assertions(
+    assertions: Assertion | list[Assertion],
+) -> Iterator[Assertion]:
+    """Walk every assertion, including all conditional branches and guards."""
+
+    def walk(item: Assertion) -> Iterator[Assertion]:
+        yield item
+        if item.type == "conditional":
+            for child in (item.when, item.then, item.otherwise):
+                if child is not None:
+                    yield from walk(child)
+
+    items = [assertions] if isinstance(assertions, Assertion) else assertions
+    for item in items:
+        yield from walk(item)
+
+
+def iter_required_assertions(assertions: list[Assertion]) -> Iterator[Assertion]:
+    """Walk assertions that can produce a required observation.
+
+    Conditional guards only select a branch. They are executed, but they are not
+    required business results; only `then` and `otherwise` subtrees are required.
+    """
+
+    def walk(item: Assertion) -> Iterator[Assertion]:
+        if item.type != "conditional":
+            yield item
+            return
+        for child in (item.then, item.otherwise):
+            if child is not None:
+                yield from walk(child)
+
+    for item in assertions:
+        yield from walk(item)
+
+
+def configured_assertion_types(assertions: list[Assertion]) -> frozenset[str]:
+    """Collect every configured assertion type recursively, including guards."""
+    return frozenset(item.type for item in iter_assertions(assertions))
+
+
+def required_assertion_types(assertions: list[Assertion]) -> frozenset[str]:
+    """Collect assertion types that can produce a required observation."""
+    return frozenset(item.type for item in iter_required_assertions(assertions))
 
 
 def _validate_url(value: str) -> str:
@@ -193,6 +279,14 @@ class MonitorConfig(BaseModel):
     @classmethod
     def validate_url(cls, value: str) -> str:
         return _validate_url(value)
+
+    @model_validator(mode="after")
+    def validate_body_assertions(self) -> MonitorConfig:
+        if self.method == "HEAD" and any(
+            item.type in BODY_ASSERTIONS for item in iter_assertions(self.assertions)
+        ):
+            raise ValueError("HEAD monitors cannot define body assertions")
+        return self
 
 
 def _safe_location(location: tuple[Any, ...] | list[Any]) -> str:

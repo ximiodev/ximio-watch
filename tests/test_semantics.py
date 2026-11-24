@@ -58,12 +58,10 @@ async def test_http_500_with_valid_json_is_not_functionally_healthy(metrics, reg
     assert result.functional_ok is False
     assert result.silent_failure is False
     assert result.outcome == "http_failure"
-    assert (
-        registry.get_sample_value(
-            "ximiowatch_functional_up", {"monitor": "monitor-a", "application": "app-a"}
-        )
-        == 0.0
-    )
+    labels = {"monitor": "monitor-a", "application": "app-a"}
+    assert registry.get_sample_value("ximiowatch_functional_up", labels) is None
+    assert registry.get_sample_value("ximiowatch_functional_configured", labels) == 1.0
+    assert registry.get_sample_value("ximiowatch_functional_evaluated", labels) == 0.0
 
 
 async def test_latency_only_failure_does_not_increment_silent_failures(metrics, registry):
@@ -204,9 +202,6 @@ async def test_performance_is_unknown_without_threshold_or_valid_measurement(met
         )
         == 1.0
     )
-    assert (
-        registry.get_sample_value(
-            "ximiowatch_performance_up", {"monitor": "slow", "application": "app-slow"}
-        )
-        == 0.0
-    )
+    slow_labels = {"monitor": "slow", "application": "app-slow"}
+    assert registry.get_sample_value("ximiowatch_performance_up", slow_labels) is None
+    assert registry.get_sample_value("ximiowatch_performance_evaluated", slow_labels) == 0.0

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -12,14 +13,26 @@ from typing import Any
 import httpx
 from opentelemetry.trace import Status, StatusCode, Tracer
 
-from .assertions import BUSINESS_ASSERTIONS, PERFORMANCE_ASSERTIONS, AssertionContext, evaluate
-from .config import MonitorConfig
+from .assertions import AssertionContext, evaluate_detailed
+from .config import (
+    BUSINESS_ASSERTIONS,
+    JSON_ASSERTIONS,
+    PERFORMANCE_ASSERTIONS,
+    TEXT_ASSERTIONS,
+    MonitorConfig,
+    configured_assertion_types,
+    required_assertion_types,
+)
 from .metrics import Metrics
-from .result import CheckResult
+from .result import CheckResult, HealthState
 
 ClientFactory = Callable[[MonitorConfig], httpx.AsyncClient]
 
 _RESPONSE_TOO_LARGE = "response_too_large"
+_NOT_EVALUATED = "not_evaluated"
+_CHARSET = re.compile(
+    r"charset\s*=\s*(?:\"([^\";\s]+)\"|'([^';\s]+)'|([^;\s]+))", re.IGNORECASE
+)
 
 
 class ResponseTooLarge(Exception):
@@ -43,8 +56,21 @@ class _BorrowedTransport(httpx.AsyncBaseTransport):
         return None
 
 
-def _performance_configured(monitor: MonitorConfig) -> bool:
-    return any(assertion.type in PERFORMANCE_ASSERTIONS for assertion in monitor.assertions)
+def _dimension_state(configured: bool, evaluated: bool, passed: bool | None) -> HealthState:
+    if not configured:
+        return "not_configured"
+    if not evaluated:
+        return "unknown"
+    return "up" if passed is True else "down"
+
+
+def _next_consecutive_failures(outcome: str, previous: int) -> int:
+    """Count confirmed failures, not performance-only or skipped checks."""
+    if outcome == "success":
+        return 0
+    if outcome in {"performance_failure", _NOT_EVALUATED}:
+        return previous
+    return previous + 1
 
 
 def _error_result(
@@ -54,7 +80,11 @@ def _error_result(
     error_type: str,
     consecutive_failures: int,
 ) -> CheckResult:
-    """Build a result for a failed request without exposing exception details."""
+    """Build a result for an incomplete request without leaking exception details."""
+    all_types = configured_assertion_types(monitor.assertions)
+    required_types = required_assertion_types(monitor.assertions)
+    functional_configured = bool(required_types & BUSINESS_ASSERTIONS)
+    performance_configured = bool(all_types & PERFORMANCE_ASSERTIONS)
     return CheckResult(
         monitor=monitor.name,
         application=monitor.application,
@@ -66,9 +96,14 @@ def _error_result(
         outcome=outcome,
         error_type=error_type,
         business_failed_types=(),
-        performance_configured=_performance_configured(monitor),
+        performance_configured=performance_configured,
         performance_ok=None,
-        consecutive_failures=consecutive_failures,
+        consecutive_failures=_next_consecutive_failures(outcome, consecutive_failures),
+        functional_configured=functional_configured,
+        functional_evaluated=False,
+        functional_state=_dimension_state(functional_configured, False, None),
+        performance_evaluated=False,
+        performance_state=_dimension_state(performance_configured, False, None),
     )
 
 
@@ -88,7 +123,11 @@ def _oversized_result(
     elapsed: float,
     consecutive_failures: int,
 ) -> CheckResult:
-    """Report an oversized response as an execution failure, not a transport error."""
+    """Report an oversized response without fabricating business evaluation."""
+    all_types = configured_assertion_types(monitor.assertions)
+    required_types = required_assertion_types(monitor.assertions)
+    functional_configured = bool(required_types & BUSINESS_ASSERTIONS)
+    performance_configured = bool(all_types & PERFORMANCE_ASSERTIONS)
     http_ok = _status_ok(monitor, status_code)
     failed_types = (_RESPONSE_TOO_LARGE,)
     if not http_ok:
@@ -104,10 +143,27 @@ def _oversized_result(
         outcome=_RESPONSE_TOO_LARGE,
         error_type="ResponseTooLarge",
         business_failed_types=(),
-        performance_configured=_performance_configured(monitor),
+        performance_configured=performance_configured,
         performance_ok=None,
-        consecutive_failures=consecutive_failures + 1,
+        consecutive_failures=_next_consecutive_failures(
+            _RESPONSE_TOO_LARGE, consecutive_failures
+        ),
+        functional_configured=functional_configured,
+        functional_evaluated=False,
+        functional_state=_dimension_state(functional_configured, False, None),
+        performance_evaluated=False,
+        performance_state=_dimension_state(performance_configured, False, None),
     )
+
+
+def _decode_text(body: bytes, content_type: str | None) -> tuple[str | None, bool]:
+    """Decode body text once. Unsupported or invalid encodings are not decodable."""
+    match = _CHARSET.search(content_type or "")
+    encoding = next((group for group in match.groups() if group), "utf-8") if match else "utf-8"
+    try:
+        return body.decode(encoding), True
+    except (LookupError, UnicodeDecodeError):
+        return None, False
 
 
 def _evaluate_response(
@@ -115,8 +171,14 @@ def _evaluate_response(
     status_code: int,
     body: bytes,
     elapsed: float,
+    content_type: str | None,
     consecutive_failures: int,
 ) -> CheckResult:
+    all_types = configured_assertion_types(monitor.assertions)
+    required_types = required_assertion_types(monitor.assertions)
+    functional_configured = bool(required_types & BUSINESS_ASSERTIONS)
+    performance_configured = bool(all_types & PERFORMANCE_ASSERTIONS)
+
     payload: Any = None
     json_valid = False
     try:
@@ -125,16 +187,32 @@ def _evaluate_response(
     except (ValueError, UnicodeDecodeError):
         pass
 
+    text: str | None = None
+    text_decodable = False
+    if all_types & TEXT_ASSERTIONS:
+        text, text_decodable = _decode_text(body, content_type)
+
     context = AssertionContext(
         status_code=status_code,
         elapsed_seconds=elapsed,
         payload=payload,
         json_valid=json_valid,
+        text=text,
+        text_decodable=text_decodable,
+        content_type=content_type,
     )
-    results = [
-        result for assertion in monitor.assertions for result in evaluate(assertion, context)
-    ]
-    failed_types = tuple(dict.fromkeys(result.type for result in results if not result.passed))
+    evaluation = evaluate_detailed(monitor.assertions, context)
+    results = evaluation.results
+    # Required failures count; latency guards also count as performance failures.
+    # Business guards only select branches and never count as business failures.
+    failed_types = tuple(
+        dict.fromkeys(
+            result.type
+            for result in evaluation.all_results
+            if not result.passed
+            and (result.role == "required" or result.type in PERFORMANCE_ASSERTIONS)
+        )
+    )
 
     status_results = [result for result in results if result.type == "http_status"]
     if status_results:
@@ -145,36 +223,70 @@ def _evaluate_response(
         if not http_ok:
             failed_types = tuple(dict.fromkeys((*failed_types, "http_status")))
 
-    json_configured = any(result.type in BUSINESS_ASSERTIONS for result in results)
-    if not json_valid and json_configured:
-        non_json_failures = tuple(
-            failed_type
-            for failed_type in failed_types
-            if failed_type not in BUSINESS_ASSERTIONS and failed_type != "invalid_json"
+    business_results = tuple(result for result in results if result.type in BUSINESS_ASSERTIONS)
+    performance_results = tuple(
+        result for result in evaluation.all_results if result.type in PERFORMANCE_ASSERTIONS
+    )
+
+    business_evaluated = False
+    business_failed_types: tuple[str, ...] = ()
+    if http_ok:
+        # Only an attempted JSON assertion (guard or selected branch) establishes a
+        # JSON contract. A JSON assertion in a skipped branch does not.
+        if (
+            functional_configured
+            and evaluation.incomplete_types & JSON_ASSERTIONS
+            and not json_valid
+        ):
+            # Invalid applicable JSON is a confirmed failure, never a silent skip.
+            non_json_failures = tuple(
+                failed_type
+                for failed_type in failed_types
+                if failed_type not in JSON_ASSERTIONS and failed_type != "invalid_json"
+            )
+            failed_types = tuple(dict.fromkeys((*non_json_failures, "invalid_json")))
+            business_failed_types = tuple(
+                failed_type
+                for failed_type in failed_types
+                if failed_type in BUSINESS_ASSERTIONS or failed_type == "invalid_json"
+            )
+            business_evaluated = True
+        else:
+            business_failed_types = tuple(
+                dict.fromkeys(result.type for result in business_results if not result.passed)
+            )
+            business_evaluated = bool(business_results) and not (
+                evaluation.incomplete and not business_failed_types
+            )
+    else:
+        # Business assertions are not claimed as evaluated when HTTP is down.
+        failed_types = tuple(
+            failed_type for failed_type in failed_types if failed_type not in BUSINESS_ASSERTIONS
         )
-        failed_types = tuple(dict.fromkeys((*non_json_failures, "invalid_json")))
 
-    business_failed_types = tuple(
-        failed_type
-        for failed_type in failed_types
-        if failed_type in BUSINESS_ASSERTIONS or failed_type == "invalid_json"
-    )
-    functional_ok = http_ok and not business_failed_types
-
-    performance_configured = _performance_configured(monitor)
-    performance_results = [
-        result for result in results if result.type in PERFORMANCE_ASSERTIONS
-    ]
     performance_ok = (
-        all(result.passed for result in performance_results) if performance_configured else None
+        all(result.passed for result in performance_results) if performance_results else None
     )
+    performance_evaluated = performance_configured and bool(performance_results)
+
+    functional_state = _dimension_state(
+        functional_configured, business_evaluated, not business_failed_types
+    )
+    performance_state = _dimension_state(
+        performance_configured, performance_evaluated, performance_ok
+    )
+    # Preserve the Stage 2 boolean contract: HTTP-only monitors remain functionally
+    # OK when HTTP succeeds; UNKNOWN and DOWN are not OK.
+    functional_ok = http_ok and functional_state in {"up", "not_configured"}
 
     if not http_ok:
         outcome = "http_failure"
-    elif business_failed_types:
+    elif functional_state == "down":
         outcome = "functional_failure"
-    elif performance_configured and not performance_ok:
+    elif performance_state == "down":
         outcome = "performance_failure"
+    elif functional_state == "unknown" or performance_state == "unknown":
+        outcome = _NOT_EVALUATED
     else:
         outcome = "success"
 
@@ -190,7 +302,12 @@ def _evaluate_response(
         business_failed_types=business_failed_types,
         performance_configured=performance_configured,
         performance_ok=performance_ok,
-        consecutive_failures=0 if functional_ok else consecutive_failures + 1,
+        consecutive_failures=_next_consecutive_failures(outcome, consecutive_failures),
+        functional_configured=functional_configured,
+        functional_evaluated=business_evaluated,
+        functional_state=functional_state,
+        performance_evaluated=performance_evaluated,
+        performance_state=performance_state,
     )
 
 
@@ -198,7 +315,7 @@ async def _read_bounded_body(response: httpx.Response, limit: int) -> bytes:
     """Consume a decoded response in bounded chunks, stopping at the first breach."""
     chunks: list[bytes] = []
     total = 0
-    async for chunk in response.aiter_bytes():
+    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
         if not chunk:
             continue
         total += len(chunk)
@@ -227,7 +344,12 @@ async def _execute_check(
                 body = await _read_bounded_body(response, monitor.max_response_bytes)
                 elapsed = time.monotonic() - started
                 return _evaluate_response(
-                    monitor, response.status_code, body, elapsed, consecutive_failures
+                    monitor,
+                    response.status_code,
+                    body,
+                    elapsed,
+                    response.headers.get("content-type"),
+                    consecutive_failures,
                 )
     except asyncio.TimeoutError:
         return _error_result(
@@ -235,7 +357,7 @@ async def _execute_check(
             time.monotonic() - started,
             "timeout",
             "TimeoutError",
-            consecutive_failures + 1,
+            consecutive_failures,
         )
     except ResponseTooLarge as exc:
         return _oversized_result(
@@ -250,7 +372,7 @@ async def _execute_check(
             time.monotonic() - started,
             "timeout",
             type(exc).__name__,
-            consecutive_failures + 1,
+            consecutive_failures,
         )
     except httpx.RequestError as exc:
         return _error_result(
@@ -258,7 +380,7 @@ async def _execute_check(
             time.monotonic() - started,
             "connection_error",
             type(exc).__name__,
-            consecutive_failures + 1,
+            consecutive_failures,
         )
     except Exception as exc:  # keep one broken monitor from affecting the others
         return _error_result(
@@ -266,7 +388,7 @@ async def _execute_check(
             time.monotonic() - started,
             "error",
             type(exc).__name__,
-            consecutive_failures + 1,
+            consecutive_failures,
         )
 
 
@@ -356,7 +478,7 @@ class MonitorEngine:
                     0.0,
                     "error",
                     type(exc).__name__,
-                    self._consecutive_failures.get(monitor.name, 0) + 1,
+                    self._consecutive_failures.get(monitor.name, 0),
                 )
                 self.metrics.record(result)
                 span.add_event("ximiowatch.error", {"error.type": type(exc).__name__})
@@ -365,9 +487,13 @@ class MonitorEngine:
             self._log(result)
 
             span.set_attribute("http.response.status_code", result.status_code or 0)
-            span.set_attribute("ximiowatch.http_up", result.http_ok)
-            span.set_attribute("ximiowatch.functional_up", result.functional_ok)
+            span.set_attribute("ximiowatch.http_state", result.http_state)
+            span.set_attribute("ximiowatch.functional_state", result.functional_state)
+            span.set_attribute("ximiowatch.performance_state", result.performance_state)
+            span.set_attribute("ximiowatch.functional_configured", result.functional_configured)
+            span.set_attribute("ximiowatch.functional_evaluated", result.functional_evaluated)
             span.set_attribute("ximiowatch.performance_configured", result.performance_configured)
+            span.set_attribute("ximiowatch.performance_evaluated", result.performance_evaluated)
             if result.performance_ok is not None:
                 span.set_attribute("ximiowatch.performance_up", result.performance_ok)
             span.set_attribute("ximiowatch.outcome", result.outcome)
@@ -390,8 +516,14 @@ class MonitorEngine:
                 "outcome": result.outcome,
                 "http_ok": result.http_ok,
                 "functional_ok": result.functional_ok,
-                "silent_failure": result.silent_failure,
+                "http_state": result.http_state,
+                "functional_state": result.functional_state,
+                "performance_state": result.performance_state,
+                "functional_configured": result.functional_configured,
+                "functional_evaluated": result.functional_evaluated,
                 "performance_configured": result.performance_configured,
+                "performance_evaluated": result.performance_evaluated,
+                "silent_failure": result.silent_failure,
                 "performance_ok": "none" if result.performance_ok is None else result.performance_ok,
                 "status_code": result.status_code or 0,
                 "duration_seconds": round(result.elapsed_seconds, 6),

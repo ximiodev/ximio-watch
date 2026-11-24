@@ -19,11 +19,18 @@ response with configurable business and content assertions. It separates three
 signals:
 
 - **HTTP health** — transport succeeded and the expected status was returned.
-- **Functional health** — HTTP health succeeded and business/content assertions passed.
-- **Performance health** — configured response-time thresholds passed.
+- **Functional health** — HTTP health succeeded and every applicable business/content
+  assertion passed.
+- **Performance health** — every applicable response-time threshold passed.
 
-A silent failure is specifically **HTTP health up + functional health down**.
-A latency breach alone is a performance failure, not a silent application failure.
+Each dimension has an explicit state: `UP`, `DOWN`, `UNKNOWN` or `NOT CONFIGURED`.
+`UNKNOWN` means the dimension is configured but no valid observation exists for the
+latest check; it is never treated as healthy or failing. `NOT CONFIGURED` means no
+applicable assertion exists.
+
+A silent failure is specifically **HTTP health UP + functional health DOWN**, based on
+a confirmed business/content failure. A latency breach alone is a performance
+failure, not a silent application failure.
 
 The included demo API and scenarios are **fictional and reproducible**: they
 simulate failures with independent toggles and do not represent real customer
@@ -67,7 +74,7 @@ are shown as unknown/stale, not healthy and not application-down.
 config/monitors.yaml ──► MonitorEngine (asyncio, one task per monitor)
                               │
                               ├─► per-monitor HTTPX client ──► target application
-                              ├─► Assertion engine (JSON paths, no eval)
+                              ├─► Assertion engine (JSON/text/content, no eval)
                               ├─► Prometheus metrics ──► /metrics ──► Prometheus ──► Grafana
                               ├─► Prometheus alert rules (/alerts)
                               ├─► JSON structured logs (stdout)
@@ -169,12 +176,51 @@ monitors:
         path: products
       - type: json_not_empty
         path: products
+      - type: content_type_contains
+        value: application/json
+      - type: text_contains
+        value: catalog-demo-01
       - type: max_response_time
         value: 1.5
 ```
 
 Each monitor runs in its own asyncio task. A timeout, connection error or exception
 in one monitor cannot stop the others. Metrics for one execution are recorded once.
+
+### Health states and evaluation rules
+
+| State | Meaning |
+| --- | --- |
+| `UP` | The dimension is configured, was evaluated for the latest completed check and passed. |
+| `DOWN` | The dimension is configured, was evaluated for the latest completed check and failed. |
+| `UNKNOWN` | The dimension is configured, but no valid observation exists for the latest check (for example a timeout, skipped conditional, undecodable body or stale data). |
+| `NOT CONFIGURED` | The monitor defines no applicable assertion for that dimension. |
+
+Dimension rules:
+
+- **HTTP** is `UP` only when the request completed and the expected status was
+  returned. It is `DOWN` for transport failures and unexpected statuses. HTTP has no
+  `NOT CONFIGURED` state; every monitor always has a status policy.
+- **Functional** requires HTTP `UP` first. HTTP-only monitors are `NOT CONFIGURED`;
+  configured business/content checks that were all skipped are `UNKNOWN`. A failed
+  HTTP check never claims that business assertions were evaluated. Invalid JSON,
+  missing fields, wrong types, absent required text and confirmed content failures
+  are `DOWN`, never a silent pass.
+- **Performance** is independent from functional health. A completed HTTP response,
+  including a completed non-2xx response, provides a valid latency observation. A
+  timeout or incomplete response does not. With no `max_response_time` assertion the
+  dimension is `NOT CONFIGURED`; with no applicable branch it is `UNKNOWN`.
+- **Silent application failure** requires HTTP `UP` plus functional `DOWN` from a
+  confirmed business/content failure. HTTP-only monitors, latency-only breaches,
+  unknown/skipped checks and engine outages never increment the silent-failure
+  counter.
+- `response_too_large` preserves the received status and HTTP state, but business
+  assertions are not fabricated: functional health is `UNKNOWN`, not `DOWN`.
+
+Binary `*_up` gauges are emitted only for `UP` or `DOWN`. When a previously healthy
+or failing dimension becomes `UNKNOWN`, the stale binary gauge is removed; the
+`*_configured` and `*_evaluated` indicators distinguish `UNKNOWN` from
+`NOT CONFIGURED`.
 
 ### Security and configuration hygiene
 
@@ -212,12 +258,14 @@ These protections do not make XimioWatch production-ready.
   for the first execution of every configured monitor.
 - `/healthz` and `/metrics` are therefore available independently of slow targets.
 - Known monitors are still identified by `ximiowatch_monitor_interval_seconds`,
-  `ximiowatch_monitor_timeout_seconds`, `ximiowatch_performance_configured` and
-  `/monitors`.
-- Before a monitor's first completed check, no `ximiowatch_http_up`,
-  `ximiowatch_functional_up` or `ximiowatch_last_check_timestamp_seconds`
-  observation exists for it. This means **unknown / not yet evaluated**, never
-  healthy.
+  `ximiowatch_monitor_timeout_seconds`, `ximiowatch_functional_configured`,
+  `ximiowatch_performance_configured` and `/monitors`.
+- Before a monitor's first completed check, no `ximiowatch_http_up`, binary
+  `ximiowatch_functional_up`, binary `ximiowatch_performance_up` or
+  `ximiowatch_last_check_timestamp_seconds` observation exists for it. This means
+  **unknown / not yet evaluated**, never healthy. The `*_configured` gauges are
+  available from startup, and `*_evaluated` gauges report whether the latest check
+  produced an applicable observation.
 - Shutdown cancels monitor tasks, awaits their completion and closes clients owned
   by the engine. An active streamed response is released during cancellation.
 
@@ -268,8 +316,9 @@ These protections do not make XimioWatch production-ready.
   responses are measured after decoding. When the limit is exceeded, consumption
   stops, the response is closed and the check records the bounded
   `response_too_large` outcome. If the expected status was already received,
-  `http_ok` remains true while `functional_ok` is false; the failure is never
-  mislabeled as a transport connection error.
+  `http_ok` remains true; the failure is never mislabeled as a transport connection
+  error. Business and performance assertions are not evaluated for a truncated body,
+  so their state is `UNKNOWN` rather than a fabricated `DOWN`.
 - Response bodies are never logged, recorded in metrics or added to spans.
 
 ### Supported assertions
@@ -283,11 +332,34 @@ These protections do not make XimioWatch production-ready.
 | `json_not_empty` | field exists, is not null and is non-empty | `{type: json_not_empty, path: products}` |
 | `numeric_gt` | numeric field > `value` | `{type: numeric_gt, path: count, value: 0}` |
 | `numeric_lt` | numeric field < `value` | `{type: numeric_lt, path: last_event_age_seconds, value: 300}` |
+| `text_contains` | decoded body contains the case-sensitive string `value` | `{type: text_contains, value: "Ready"}` |
+| `text_not_contains` | decoded body does not contain the case-sensitive string `value` | `{type: text_not_contains, value: "ERROR"}` |
+| `content_type_contains` | `Content-Type` header contains `value` | `{type: content_type_contains, value: application/json}` |
 | `conditional` | `then` is checked only when `when` passes; optional `otherwise` | see below |
 
 Dotted paths also index arrays, for example `products.0.available`. Invalid JSON,
 missing fields, wrong types, timeouts and connection errors become failed checks,
 never application crashes. No `eval`, shell execution or arbitrary expressions are used.
+
+**JSON and content semantics**
+
+- JSON assertions require a valid JSON body. Invalid JSON is a confirmed functional
+  failure when an applicable JSON assertion is attempted (a guard or a selected
+  branch); it is not silently skipped. A JSON assertion that exists only in a
+  skipped branch is not attempted and does not establish a JSON contract.
+- `text_contains` and `text_not_contains` compare against the decoded response body
+  and are **case-sensitive**. Their `value` must be a non-empty string.
+- Text uses the charset declared in `Content-Type`, or UTF-8 when no charset is
+  declared. Unsupported encodings, invalid byte sequences and missing bodies leave
+  text assertions `UNKNOWN`; a negative text assertion never passes on an
+  undecodable body.
+- `content_type_contains` compares case-insensitively against the `Content-Type`
+  header value. A missing header, an incompatible header or a non-string/empty
+  configured value fails. It is safe for HEAD monitors.
+- Body assertions (`json_*`, `numeric_*`, `text_contains`, `text_not_contains`) are
+  rejected recursively for HEAD monitors. `content_type_contains` remains valid.
+- Text and HTML assertions inspect returned HTTP content only. XimioWatch does not
+  execute browser JavaScript, render HTML or run a browser.
 
 **Null and missing-field semantics**
 
@@ -315,11 +387,32 @@ never application crashes. No `eval`, shell execution or arbitrary expressions a
           value: false
 ```
 
-A failed `when` guard skips `then`; if no `otherwise` is configured, the conditional
-contributes no assertion result and therefore does not fail the check. Because of
-this, the fiscal demonstration monitor also has a standalone
-`json_equals path: authorized value: true` assertion so a missing, null or `false`
-authorization state can never pass merely because both branches were skipped.
+A failed `when` guard skips `then` and selects `otherwise` when present. A false
+guard is not itself a business failure. Guards are evaluated to choose a branch but
+are not counted as required business results; `otherwise` is treated exactly like
+`then` and is a required assertion when selected. A monitor whose only business
+assertion is a guard has functional health `NOT CONFIGURED`. Latency assertions used
+as guards are still valid performance observations.
+
+An empty guard never succeeds, and an unevaluable guard does not fabricate a
+branch. When required business assertions are configured, an attempted JSON guard
+with an invalid body is a confirmed functional failure; a JSON assertion located
+only in a skipped branch is not attempted. A guard-only business configuration
+remains `NOT CONFIGURED` and does not claim a functional evaluation.
+Configured branches can be nested conditionals; their
+business and performance assertions are discovered recursively. If every applicable
+business branch is skipped, functional health is `UNKNOWN`, not `UP`. If every
+applicable performance branch is skipped, performance health is `UNKNOWN`. Because
+skips can hide a broken workflow, the fiscal demonstration monitor also has a
+standalone `json_equals path: authorized value: true` assertion so a missing, null
+or `false` authorization state can never pass merely because both branches were
+skipped.
+
+`http_status` is allowed only as a top-level assertion, including when branches are
+nested; a conditional status assertion is rejected at configuration load. Guards
+need a real assertion, and ambiguous or unsupported conditional structures are
+rejected. There is no general expression language: operators are limited to the
+configured assertion types above.
 
 If no `http_status` assertion is configured, only a 2xx response counts as HTTP
 available; 3xx and other responses are HTTP failures. An explicit `http_status`
@@ -335,29 +428,39 @@ or application field values are exported.
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
-| `ximiowatch_http_up` | Gauge | `1` when HTTP transport and status health passed |
-| `ximiowatch_functional_up` | Gauge | `1` when HTTP health and business/content assertions passed |
-| `ximiowatch_performance_up` | Gauge | `1` when configured latency thresholds passed; absent when none configured |
-| `ximiowatch_performance_configured` | Gauge | `1` when a `max_response_time` assertion is configured |
+| `ximiowatch_http_up` | Gauge | `1` when HTTP transport and status health passed, otherwise `0` |
+| `ximiowatch_functional_up` | Gauge | `1` for functional `UP`, `0` for functional `DOWN`; absent for `UNKNOWN` or `NOT CONFIGURED` |
+| `ximiowatch_functional_configured` | Gauge | `1` when the monitor defines business/content assertions, `0` otherwise |
+| `ximiowatch_functional_evaluated` | Gauge | `1` when the latest check produced an applicable functional observation |
+| `ximiowatch_performance_up` | Gauge | `1` for performance `UP`, `0` for `DOWN`; absent for `UNKNOWN` or `NOT CONFIGURED` |
+| `ximiowatch_performance_configured` | Gauge | `1` when the monitor defines a `max_response_time` assertion, including inside a conditional |
+| `ximiowatch_performance_evaluated` | Gauge | `1` when the latest check produced an applicable latency observation |
 | `ximiowatch_monitor_interval_seconds` | Gauge | Configured fixed delay between completed checks |
 | `ximiowatch_monitor_timeout_seconds` | Gauge | Configured absolute request deadline |
-| `ximiowatch_checks_total` | Counter | Executions by `outcome` (`success`, `functional_failure`, `performance_failure`, `http_failure`, `timeout`, `connection_error`, `error`, `response_too_large`) |
-| `ximiowatch_assertion_failures_total` | Counter | Failures by assertion `type` |
-| `ximiowatch_silent_failures_total` | Counter | HTTP available + business/content assertion failure only |
+| `ximiowatch_checks_total` | Counter | Executions by `outcome` (`success`, `functional_failure`, `performance_failure`, `http_failure`, `timeout`, `connection_error`, `error`, `response_too_large`, `not_evaluated`) |
+| `ximiowatch_assertion_failures_total` | Counter | Failures by bounded assertion `type` |
+| `ximiowatch_silent_failures_total` | Counter | HTTP up plus confirmed business/content failure only |
 | `ximiowatch_request_duration_seconds` | Histogram | Duration of completed HTTP responses |
-| `ximiowatch_consecutive_failures` | Gauge | Consecutive HTTP or functional failures; latency-only failures do not increment it |
-| `ximiowatch_last_success_timestamp_seconds` | Gauge | Last fully healthy check (HTTP + functional + configured performance) |
-| `ximiowatch_last_check_timestamp_seconds` | Gauge | Last completed check, including unsuccessful checks |
+| `ximiowatch_consecutive_failures` | Gauge | Consecutive HTTP, functional or transport failures; latency-only failures do not increment it |
+| `ximiowatch_last_success_timestamp_seconds` | Gauge | Last fully healthy check (HTTP + applicable functional and performance dimensions) |
+| `ximiowatch_last_check_timestamp_seconds` | Gauge | Last completed check, including unsuccessful and unevaluated checks |
 
 Notes:
 
 - Each completed check updates these metrics exactly once. A cancelled check is not
   a completed check and is not recorded.
+- Binary `functional_up` and `performance_up` series are removed when the latest
+  observation is `UNKNOWN` or the dimension is `NOT CONFIGURED`. Do not infer
+  `UNKNOWN` from absence alone: combine `*_configured` and `*_evaluated`.
 - `response_too_large` is a bounded execution outcome. It can coexist with
-  `http_ok = 1` when the expected status was received, but `functional_ok` is
-  always `0`.
+  `http_ok = 1` when the expected status was received, but functional assertions are
+  not evaluated and `functional_evaluated = 0`.
 - A configured performance check with no valid latency measurement (for example a
-  timeout) records `performance_up = 0`; it is not reported healthy.
+  timeout) leaves `performance_up` absent and sets `performance_evaluated = 0`; it
+  is not reported healthy or failing.
+- `not_evaluated` means HTTP succeeded but a configured dimension had no applicable
+  assertion for this response. It is not a success and does not update the last
+  fully healthy timestamp.
 - Counters and gauges are in-process and reset when XimioWatch restarts. Prometheus
   handles counter resets; historical continuity depends on Prometheus retention.
 
@@ -392,7 +495,7 @@ production tuning.
 
 | Alert | Condition | `for` |
 | --- | --- | --- |
-| `SilentApplicationFailure` | HTTP up, functional down, recent measurement, XimioWatch target up | `30s` |
+| `SilentApplicationFailure` | HTTP up, functional down, functional evaluated, recent measurement, XimioWatch target up | `30s` |
 | `XimioWatchUnavailable` | `up{job="ximiowatch"} == 0` | `30s` |
 
 Alerts are visible at Prometheus `/alerts`. There is **no Alertmanager or
@@ -442,10 +545,17 @@ During a silent failure, expect `http_up = 1`, `functional_up = 0`, an increment
 Open http://localhost:3000 and select **XimioWatch - Functional Health**. Panels
 distinguish:
 
-- **Current healthy monitors (%)** — fresh, scrapeable and fully healthy monitors.
-- **Current failing monitors** — fresh monitors with HTTP, functional or performance failure.
-- **Unknown or stale monitors** — no recent measurement or XimioWatch scrape target down.
+- **Current healthy monitors (%)** — fresh, scrapeable monitors whose configured
+  dimensions are all `UP`. Not-configured dimensions are excluded; unevaluated
+  dimensions are not counted as healthy. The panel shows no value when no observation
+  is available.
+- **Current failing monitors** — fresh monitors with a confirmed HTTP, functional or
+  performance `DOWN`. Unknown, skipped and not-configured dimensions are not failures.
+- **Unknown or stale monitors** — configured monitors that are neither confirmed
+  healthy nor confirmed failing, including unevaluated dimensions and stale data.
 - **Current monitor state** — healthy / failing / unknown-or-stale per monitor.
+- **Dimension state** — per-monitor HTTP, functional and performance state, using
+  `up`, `down`, `unknown` and `not_configured` labels.
 - **Historical check-based availability (%)** — averaged observations over the selected range.
 
 Historical panels keep valid observations and show gaps when data is unavailable;
@@ -467,14 +577,15 @@ python -m pytest -q
 
 Tests use HTTPX mock transports, controlled streams and isolated Prometheus
 registries; they need no Docker, network connection or demonstration API. Coverage
-includes assertion semantics, HTTP/functional/performance separation, latency-only
+includes assertion semantics, explicit health states, recursive conditional guards
+and branches, content assertions, HTTP/functional/performance separation, latency-only
 and combined failures, absolute deadlines, slow and header-stage timeouts, bounded
 and decoded response-size enforcement, response cleanup, cookie isolation,
-external-cancellation propagation, redirect behavior, exact-once metric recording,
-sanitized diagnostics, secret-safe configuration errors, method/URL validation,
-background startup, initial unknown state, graceful shutdown, build-context hygiene,
-alert rule structure, monitor isolation, environment expansion, recovery and the
-direct `/metrics` endpoint.
+external-cancellation propagation, redirect behavior, state-aware and exact-once
+metric recording, sanitized diagnostics, secret-safe configuration errors, method/URL
+validation, background startup, initial unknown state, graceful shutdown,
+build-context hygiene, alert rule structure, monitor isolation, environment expansion,
+recovery and the direct `/metrics` endpoint.
 
 GitHub Actions runs the same suite on Python 3.12 via
 [`.github/workflows/tests.yml`](.github/workflows/tests.yml). Secret scanning runs
@@ -501,8 +612,16 @@ separately via
 - Polling only; fixed-delay scheduling is not drift-compensated.
 - GET/HEAD cannot prove that an endpoint has no side effects; operators must review
   target endpoint contracts.
-- The body limit applies to decoded response data, but JSON parsing still occurs in
-  memory after a response passes the limit check.
+- The body limit applies to decoded response data. A compressed response is decoded
+  in bounded chunks, but a single compressed chunk may expand into a larger decoded
+  chunk before the cumulative limit is checked, so peak memory can temporarily
+  exceed `max_response_bytes` by roughly one decoded chunk plus transport buffering.
+  JSON parsing and text decoding still occur in memory after a body passes the limit
+  check.
+- HTML/content checks inspect returned bytes only; JavaScript execution, DOM rendering
+  and browser-based assertions are not supported.
+- Conditional skips are represented as `UNKNOWN`, not healthy. Operators should add
+  standalone guard assertions when a skipped branch could hide a broken workflow.
 - No notification channels; Prometheus alerts are visible only in `/alerts`.
 - No database, authentication, user management, custom frontend or multi-tenancy.
 - No Kubernetes, Terraform or cloud deployment.

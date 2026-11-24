@@ -25,6 +25,7 @@ def test_alert_rules_define_both_required_alerts():
     for required in (
         "ximiowatch_http_up == 1",
         "ximiowatch_functional_up == 0",
+        "ximiowatch_functional_evaluated == 1",
         "ximiowatch_last_check_timestamp_seconds",
         'up{job="ximiowatch"} == 1',
     ):

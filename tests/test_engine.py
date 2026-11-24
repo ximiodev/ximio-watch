@@ -42,12 +42,10 @@ async def test_failed_monitor_does_not_interrupt_others(metrics, registry):
         )
         == 1.0
     )
-    assert (
-        registry.get_sample_value(
-            "ximiowatch_functional_up", {"monitor": "broken", "application": "app-broken"}
-        )
-        == 0.0
-    )
+    broken_labels = {"monitor": "broken", "application": "app-broken"}
+    assert registry.get_sample_value("ximiowatch_functional_up", broken_labels) is None
+    assert registry.get_sample_value("ximiowatch_functional_configured", broken_labels) == 0.0
+    assert registry.get_sample_value("ximiowatch_functional_evaluated", broken_labels) == 0.0
 
 
 async def test_one_broken_loop_does_not_stop_other_loops(metrics):

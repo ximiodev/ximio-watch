@@ -7,6 +7,7 @@ groups:
           (
             ximiowatch_http_up == 1
             and on(monitor, application) (ximiowatch_functional_up == 0)
+            and on(monitor, application) (ximiowatch_functional_evaluated == 1)
             and on(monitor, application)
               (time() - ximiowatch_last_check_timestamp_seconds
                 < (3 * ximiowatch_monitor_interval_seconds

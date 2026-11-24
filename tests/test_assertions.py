@@ -167,9 +167,11 @@ async def test_conditional_assertions(metrics):
     ) as client:
         triggered = await check_monitor(monitor, client, metrics=metrics)
 
-    assert skipped.outcome == "success"
+    assert skipped.outcome == "not_evaluated"
+    assert skipped.functional_state == "unknown"
     assert skipped.failed_types == ()
     assert triggered.outcome == "functional_failure"
+    assert triggered.functional_state == "down"
     assert triggered.failed_types == ("json_exists",)
 
 

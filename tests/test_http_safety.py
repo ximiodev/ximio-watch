@@ -147,7 +147,9 @@ async def test_response_larger_than_limit_is_bounded_and_closes_response(metrics
         )
         == 1.0
     )
-    assert registry.get_sample_value("ximiowatch_functional_up", BASE_LABELS) == 0.0
+    assert registry.get_sample_value("ximiowatch_functional_up", BASE_LABELS) is None
+    assert registry.get_sample_value("ximiowatch_functional_configured", BASE_LABELS) == 0.0
+    assert registry.get_sample_value("ximiowatch_functional_evaluated", BASE_LABELS) == 0.0
 
 
 async def test_oversized_response_without_content_length_is_rejected(metrics):

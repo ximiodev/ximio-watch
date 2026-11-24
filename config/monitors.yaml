@@ -1,5 +1,15 @@
 # All values are fictional demonstration data.
 # ${VAR} / ${VAR:default} references are resolved from environment variables.
+#
+# Health states: up, down, unknown (configured but not evaluated) and
+# not_configured (no applicable assertion). HTTP-only monitors are valid: their
+# functional and performance dimensions are not_configured. A silent application
+# failure requires HTTP up plus a confirmed functional down.
+#
+# Assertions are declarative. Text comparisons are case-sensitive;
+# content_type_contains is case-insensitive. Text/HTML checks inspect the returned
+# body only; no browser JavaScript is executed. Body assertions are rejected for
+# HEAD monitors, including inside conditionals. http_status is top-level only.
 
 monitors:
   - name: restaurant_catalog
@@ -21,6 +31,12 @@ monitors:
       - type: json_equals
         path: status
         value: ready
+      # These content checks pass for both healthy and failed demo responses;
+      # they demonstrate text/content-type evaluation without changing outcomes.
+      - type: content_type_contains
+        value: application/json
+      - type: text_contains
+        value: catalog-demo-01
 
   - name: fiscal_authorization
     application: demo-billing
@@ -35,10 +51,14 @@ monitors:
       - type: http_status
         value: 200
       # Standalone guard: a missing/null/false authorized state must never pass
-      # merely because both conditional branches were skipped.
+      # merely because both conditional branches were skipped. Without it, an
+      # all-skipped conditional tree would be unknown, not healthy.
       - type: json_equals
         path: authorized
         value: true
+      # A false guard is not itself a business failure. Guards select branches but
+      # are not counted as required business results. `otherwise`, when present,
+      # is a required assertion when selected.
       - type: conditional
         when:
           type: json_equals
@@ -76,3 +96,31 @@ monitors:
       - type: numeric_lt
         path: last_event_age_seconds
         value: 300
+
+# Example of a valid HTTP-only monitor (functional/performance not_configured):
+#
+#   - name: http_only_probe
+#     application: demo-platform
+#     url: http://localhost:8001/healthz
+#     method: GET
+#     interval_seconds: 30
+#     timeout_seconds: 2
+#     assertions:
+#       - type: http_status
+#         value: 200
+
+# Example of a nested performance assertion discovered recursively. If the guard
+# is false, performance is unknown rather than healthy or failing:
+#
+#   - name: conditional_latency_probe
+#     application: demo-platform
+#     url: http://localhost:8001/healthz
+#     assertions:
+#       - type: conditional
+#         when:
+#           type: json_equals
+#           path: strict
+#           value: true
+#         then:
+#           type: max_response_time
+#           value: 1.5
