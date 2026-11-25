@@ -1,0 +1,82 @@
+# Shared Stage 4 recording rules.
+#
+# Freshness window = 3 * configured interval + configured timeout + 15s.
+# The 15s margin covers the 5s scrape interval, 5s rule evaluation interval,
+# fixed-delay scheduling jitter and a short scrape retry window.
+# Startup grace = 60s. An observation from before the current process start is
+# never accepted as fresh, and a monitor with no first check is not stale until
+# this grace has elapsed.
+#
+# Scrape-added instance/job labels are deliberately dropped. Every recorded
+# series keeps only the bounded monitor and application labels.
+
+groups:
+  - name: ximiowatch-state
+    interval: 5s
+    rules:
+      - record: ximiowatch_monitor_fresh
+        expr: |
+          max by (monitor, application) (
+            1 + 0 * (
+              ximiowatch_last_check_timestamp_seconds
+                >= on() group_left() ximiowatch_startup_timestamp_seconds
+              and on(monitor, application)
+                (
+                  time() - ximiowatch_last_check_timestamp_seconds
+                    < (3 * ximiowatch_monitor_interval_seconds
+                       + ximiowatch_monitor_timeout_seconds + 15)
+                )
+              and on() (count(up{job="ximiowatch"} == 1) > 0)
+            )
+          )
+
+      - record: ximiowatch_monitor_stale
+        expr: |
+          max by (monitor, application) (
+            1 + 0 * (
+              (
+                (
+                  ximiowatch_monitor_interval_seconds
+                  unless on(monitor, application) ximiowatch_last_check_timestamp_seconds
+                )
+                or
+                (
+                  ximiowatch_last_check_timestamp_seconds
+                    < on() group_left() ximiowatch_startup_timestamp_seconds
+                )
+                or
+                (
+                  ximiowatch_last_check_timestamp_seconds
+                  and on(monitor, application)
+                    (
+                      time() - ximiowatch_last_check_timestamp_seconds
+                        >= (3 * ximiowatch_monitor_interval_seconds
+                            + ximiowatch_monitor_timeout_seconds + 15)
+                    )
+                )
+              )
+              and on() (count(up{job="ximiowatch"} == 1) > 0)
+              and on() (time() - ximiowatch_startup_timestamp_seconds >= 60)
+            )
+          )
+
+      - record: ximiowatch_monitor_incomplete
+        expr: |
+          max by (monitor, application) (
+            (
+              ximiowatch_http_up == 1
+              and on(monitor, application) ximiowatch_monitor_fresh == 1
+              and on(monitor, application)
+                (
+                  (
+                    ximiowatch_functional_configured == 1
+                    and on(monitor, application) ximiowatch_functional_evaluated == 0
+                  )
+                  or
+                  (
+                    ximiowatch_performance_configured == 1
+                    and on(monitor, application) ximiowatch_performance_evaluated == 0
+                  )
+                )
+            )
+          )

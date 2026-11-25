@@ -25,6 +25,11 @@ def test_ignore_rules_protect_private_monitor_configuration():
         "config/production/",
         "config/monitors.*.yaml",
         "secrets/",
+        "alertmanager/private/",
+        "alertmanager/secrets/",
+        "alertmanager/*.local.yml",
+        "*.telegram_token",
+        "*.chat_id",
         "*.pem",
         "*.key",
         ".env",
@@ -41,3 +46,19 @@ def test_ignore_rules_protect_private_monitor_configuration():
     for lines in (gitignore, dockerignore):
         assert "config/" not in lines
         assert "!config/monitors.yaml" not in lines
+
+
+def test_verification_assets_are_versioned_but_excluded_from_images():
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+
+    # The overlay mounts these files read-only; they must be reproducible from
+    # the repository but must not be copied into production runtime images.
+    assert "verification/" in dockerignore
+    assert not any(line.strip() == "verification/" for line in gitignore)
+    for name in ("fixtures.py", "mock_receiver.py", "monitors.yaml"):
+        assert (ROOT / "verification" / name).is_file()
+
+    overlay = (ROOT / "docker-compose.alertmanager.yml").read_text(encoding="utf-8")
+    for name in ("fixtures.py", "mock_receiver.py", "monitors.yaml"):
+        assert f"./verification/{name}:" in overlay

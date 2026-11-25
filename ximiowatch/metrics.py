@@ -57,6 +57,12 @@ class Metrics:
 
     def __init__(self, registry: CollectorRegistry | None = None, prefix: str = "ximiowatch"):
         self.registry: CollectorRegistry = registry if registry is not None else REGISTRY
+        self.startup_timestamp_seconds = Gauge(
+            f"{prefix}_startup_timestamp_seconds",
+            "Unix timestamp when the monitor process started",
+            registry=self.registry,
+        )
+        self.startup_timestamp_seconds.set(time.time())
         self.http_up = Gauge(
             f"{prefix}_http_up",
             "1 when the HTTP availability check passed, 0 otherwise",

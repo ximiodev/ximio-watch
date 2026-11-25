@@ -1,0 +1,45 @@
+# Safe local demonstration configuration. No real notification credentials.
+# Firing and resolved alerts are sent to the controlled local mock receiver.
+# Telegram routing is documented separately in alertmanager.telegram.example.yml.
+
+global:
+  resolve_timeout: 5m
+
+templates:
+  - templates/*.tmpl
+
+route:
+  receiver: demo-webhook
+  group_by: ['alertname', 'application', 'monitor']
+  group_wait: 2s
+  group_interval: 10s
+  repeat_interval: 1m
+
+receivers:
+  - name: demo-webhook
+    webhook_configs:
+      - url: http://mock-receiver:8080/notify
+        send_resolved: true
+
+inhibit_rules:
+  - name: http-failure-suppresses-secondary-symptoms
+    source_matchers:
+      - 'alertname="ApplicationHttpFailure"'
+    target_matchers:
+      - 'alertname=~"ApplicationPerformanceDegraded|MonitorEvaluationIncomplete|SilentApplicationFailure"'
+    equal: ['application', 'monitor']
+
+  - name: functional-failure-suppresses-secondary-symptoms
+    source_matchers:
+      - 'alertname="SilentApplicationFailure"'
+    target_matchers:
+      - 'alertname=~"ApplicationPerformanceDegraded|MonitorEvaluationIncomplete"'
+    equal: ['application', 'monitor']
+
+  # Exporter unavailability invalidates all per-monitor observations, so this
+  # suppression is intentionally global rather than application-scoped.
+  - name: exporter-unavailable-suppresses-per-monitor-alerts
+    source_matchers:
+      - 'alertname="XimioWatchUnavailable"'
+    target_matchers:
+      - 'alertname=~"ApplicationHttpFailure|SilentApplicationFailure|ApplicationPerformanceDegraded|MonitorEvaluationIncomplete|XimioWatchMonitorStale"'

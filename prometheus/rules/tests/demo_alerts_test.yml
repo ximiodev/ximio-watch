@@ -1,0 +1,524 @@
+# PromQL rule tests for the fast demonstration thresholds.
+# Run from the repository root with:
+#   docker run --rm --entrypoint promtool -v "${PWD}:/workspace" -w /workspace \
+#     prom/prometheus:v3.2.1 test rules prometheus/rules/tests/demo_alerts_test.yml
+
+rule_files:
+  - ../recording.yml
+  - ../alerts.yml
+
+evaluation_interval: 5s
+
+group_eval_order:
+  - ximiowatch-state
+  - ximiowatch-demo-alerts
+
+tests:
+  - name: healthy application does not alert
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="app-a"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="app-a"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_up{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_performance_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="app-a"}'
+        values: '0x40'
+      - series: 'ximiowatch_performance_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="app-a"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: ApplicationHttpFailure
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: SilentApplicationFailure
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: ApplicationPerformanceDegraded
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: MonitorEvaluationIncomplete
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: XimioWatchMonitorStale
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: XimioWatchUnavailable
+        exp_alerts: []
+
+  - name: http failure produces ApplicationHttpFailure
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="http-down", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="http-down", application="app-a"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="http-down", application="app-a"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="http-down", application="app-a"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 20s
+        alertname: ApplicationHttpFailure
+        exp_alerts:
+          - exp_labels:
+              monitor: http-down
+              application: app-a
+              severity: critical
+              service: ximiowatch
+            exp_annotations:
+              summary: "Application HTTP failure on http-down"
+              description: "A recent completed observation reported HTTP DOWN for application app-a. Transport, timeout, TLS and unexpected status failures are all included."
+      - eval_time: 20s
+        alertname: XimioWatchUnavailable
+        exp_alerts: []
+
+  - name: functional failure with http up produces SilentApplicationFailure
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="silent", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="silent", application="app-a"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="silent", application="app-a"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="silent", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="silent", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="silent", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_up{job="ximiowatch", instance="ximiowatch:8000", monitor="silent", application="app-a"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 25s
+        alertname: SilentApplicationFailure
+        exp_alerts:
+          - exp_labels:
+              monitor: silent
+              application: app-a
+              severity: warning
+              service: ximiowatch
+            exp_annotations:
+              summary: "Silent application failure on silent"
+              description: "HTTP is available but evaluated business/content assertions are failing for application app-a. The observation is recent and the exporter is available."
+
+  - name: latency-only failure produces ApplicationPerformanceDegraded
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="slow", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="slow", application="app-a"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="slow", application="app-a"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="slow", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="slow", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="slow", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_up{job="ximiowatch", instance="ximiowatch:8000", monitor="slow", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_performance_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="slow", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_performance_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="slow", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_performance_up{job="ximiowatch", instance="ximiowatch:8000", monitor="slow", application="app-a"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: ApplicationPerformanceDegraded
+        exp_alerts:
+          - exp_labels:
+              monitor: slow
+              application: app-a
+              severity: warning
+              service: ximiowatch
+            exp_annotations:
+              summary: "Application performance degraded on slow"
+              description: "A recent observation breached a configured response-time threshold for application app-a while HTTP was available. Confirmed functional failures are handled separately."
+      - eval_time: 30s
+        alertname: SilentApplicationFailure
+        exp_alerts: []
+
+  - name: http-only monitor does not produce functional or performance alerts
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="http-only", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="http-only", application="app-a"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="http-only", application="app-a"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="http-only", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="http-only", application="app-a"}'
+        values: '0x40'
+      - series: 'ximiowatch_functional_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="http-only", application="app-a"}'
+        values: '0x40'
+      - series: 'ximiowatch_performance_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="http-only", application="app-a"}'
+        values: '0x40'
+      - series: 'ximiowatch_performance_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="http-only", application="app-a"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: SilentApplicationFailure
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: ApplicationPerformanceDegraded
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: MonitorEvaluationIncomplete
+        exp_alerts: []
+
+  - name: unknown functional state does not produce SilentApplicationFailure
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="unknown-functional", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="unknown-functional", application="app-a"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="unknown-functional", application="app-a"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="unknown-functional", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="unknown-functional", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="unknown-functional", application="app-a"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 25s
+        alertname: SilentApplicationFailure
+        exp_alerts: []
+      - eval_time: 25s
+        alertname: MonitorEvaluationIncomplete
+        exp_alerts:
+          - exp_labels:
+              monitor: unknown-functional
+              application: app-a
+              severity: warning
+              service: ximiowatch
+            exp_annotations:
+              summary: "Incomplete monitoring evaluation on unknown-functional"
+              description: "HTTP is available, but a configured functional or performance dimension has no valid latest observation for application app-a. This is not a confirmed business failure."
+
+  - name: missing performance evaluation is incomplete not failed
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="missing-latency", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="missing-latency", application="app-a"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="missing-latency", application="app-a"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="missing-latency", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="missing-latency", application="app-a"}'
+        values: '0x40'
+      - series: 'ximiowatch_functional_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="missing-latency", application="app-a"}'
+        values: '0x40'
+      - series: 'ximiowatch_performance_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="missing-latency", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_performance_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="missing-latency", application="app-a"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 25s
+        alertname: ApplicationPerformanceDegraded
+        exp_alerts: []
+      - eval_time: 25s
+        alertname: MonitorEvaluationIncomplete
+        exp_alerts:
+          - exp_labels:
+              monitor: missing-latency
+              application: app-a
+              severity: warning
+              service: ximiowatch
+            exp_annotations:
+              summary: "Incomplete monitoring evaluation on missing-latency"
+              description: "HTTP is available, but a configured functional or performance dimension has no valid latest observation for application app-a. This is not a confirmed business failure."
+
+  - name: stale observation suppresses confirmed application state alerts
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="stale", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="stale", application="app-a"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="stale", application="app-a"}'
+        values: '0x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="stale", application="app-a"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 130s
+        alertname: ApplicationHttpFailure
+        exp_alerts: []
+      - eval_time: 130s
+        alertname: XimioWatchMonitorStale
+        exp_alerts:
+          - exp_labels:
+              monitor: stale
+              application: app-a
+              severity: critical
+              service: ximiowatch
+            exp_annotations:
+              summary: "Stale monitor observation for stale"
+              description: "No recent completed observation exists for monitor stale in application app-a. Confirmed application-state alerts are suppressed for stale data."
+
+  - name: initial startup grace and never completed first check
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="no-first-check", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="no-first-check", application="app-a"}'
+        values: '2x40'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: XimioWatchMonitorStale
+        exp_alerts: []
+      - eval_time: 120s
+        alertname: XimioWatchMonitorStale
+        exp_alerts:
+          - exp_labels:
+              monitor: no-first-check
+              application: app-a
+              severity: critical
+              service: ximiowatch
+            exp_annotations:
+              summary: "Stale monitor observation for no-first-check"
+              description: "No recent completed observation exists for monitor no-first-check in application app-a. Confirmed application-state alerts are suppressed for stale data."
+
+  - name: exporter unavailable suppresses per monitor alerts
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '0x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="exporter-down", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="exporter-down", application="app-a"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="exporter-down", application="app-a"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="exporter-down", application="app-a"}'
+        values: '0x40'
+      - series: 'ximiowatch_functional_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="exporter-down", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="exporter-down", application="app-a"}'
+        values: '1x40'
+      - series: 'ximiowatch_functional_up{job="ximiowatch", instance="ximiowatch:8000", monitor="exporter-down", application="app-a"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 20s
+        alertname: XimioWatchUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: ximiowatch
+              instance: ximiowatch:8000
+              severity: critical
+              service: ximiowatch
+            exp_annotations:
+              summary: "XimioWatch exporter unavailable"
+              description: "The configured XimioWatch scrape target is failing or absent. Per-monitor alerts are suppressed while the exporter is unavailable."
+      - eval_time: 20s
+        alertname: ApplicationHttpFailure
+        exp_alerts: []
+      - eval_time: 20s
+        alertname: SilentApplicationFailure
+        exp_alerts: []
+      - eval_time: 20s
+        alertname: XimioWatchMonitorStale
+        exp_alerts: []
+
+  - name: absent exporter target produces XimioWatchUnavailable
+    interval: 5s
+    input_series:
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="absent-exporter", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="absent-exporter", application="app-a"}'
+        values: '2x40'
+    alert_rule_test:
+      - eval_time: 20s
+        alertname: XimioWatchUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: ximiowatch
+              severity: critical
+              service: ximiowatch
+            exp_annotations:
+              summary: "XimioWatch exporter unavailable"
+              description: "The configured XimioWatch scrape target is failing or absent. Per-monitor alerts are suppressed while the exporter is unavailable."
+      - eval_time: 20s
+        alertname: XimioWatchMonitorStale
+        exp_alerts: []
+
+  - name: recovery clears the applicable alert
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="recovering", application="app-a"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="recovering", application="app-a"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="recovering", application="app-a"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="recovering", application="app-a"}'
+        values: '0x5 1x36'
+    alert_rule_test:
+      - eval_time: 20s
+        alertname: ApplicationHttpFailure
+        exp_alerts:
+          - exp_labels:
+              monitor: recovering
+              application: app-a
+              severity: critical
+              service: ximiowatch
+            exp_annotations:
+              summary: "Application HTTP failure on recovering"
+              description: "A recent completed observation reported HTTP DOWN for application app-a. Transport, timeout, TLS and unexpected status failures are all included."
+      - eval_time: 60s
+        alertname: ApplicationHttpFailure
+        exp_alerts: []
+
+  - name: multiple applications and monitors remain isolated
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x40'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="failing", application="alpha"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="failing", application="alpha"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="failing", application="alpha"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="failing", application="alpha"}'
+        values: '0x40'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="beta"}'
+        values: '10x40'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="beta"}'
+        values: '2x40'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="beta"}'
+        values: '0+5x40'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="healthy", application="beta"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 20s
+        alertname: ApplicationHttpFailure
+        exp_alerts:
+          - exp_labels:
+              monitor: failing
+              application: alpha
+              severity: critical
+              service: ximiowatch
+            exp_annotations:
+              summary: "Application HTTP failure on failing"
+              description: "A recent completed observation reported HTTP DOWN for application alpha. Transport, timeout, TLS and unexpected status failures are all included."
+
+  - name: sustained incomplete evaluation stays incomplete, not failed
+    interval: 5s
+    input_series:
+      - series: 'up{job="ximiowatch", instance="ximiowatch:8000"}'
+        values: '1x80'
+      - series: 'ximiowatch_startup_timestamp_seconds'
+        values: '0x80'
+      - series: 'ximiowatch_monitor_interval_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="sustained-incomplete", application="app-a"}'
+        values: '10x80'
+      - series: 'ximiowatch_monitor_timeout_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="sustained-incomplete", application="app-a"}'
+        values: '2x80'
+      - series: 'ximiowatch_last_check_timestamp_seconds{job="ximiowatch", instance="ximiowatch:8000", monitor="sustained-incomplete", application="app-a"}'
+        values: '0+5x80'
+      - series: 'ximiowatch_http_up{job="ximiowatch", instance="ximiowatch:8000", monitor="sustained-incomplete", application="app-a"}'
+        values: '1x80'
+      - series: 'ximiowatch_functional_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="sustained-incomplete", application="app-a"}'
+        values: '1x80'
+      - series: 'ximiowatch_functional_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="sustained-incomplete", application="app-a"}'
+        values: '0x80'
+      - series: 'ximiowatch_performance_configured{job="ximiowatch", instance="ximiowatch:8000", monitor="sustained-incomplete", application="app-a"}'
+        values: '0x80'
+      - series: 'ximiowatch_performance_evaluated{job="ximiowatch", instance="ximiowatch:8000", monitor="sustained-incomplete", application="app-a"}'
+        values: '0x80'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: MonitorEvaluationIncomplete
+        exp_alerts:
+          - exp_labels:
+              monitor: sustained-incomplete
+              application: app-a
+              severity: warning
+              service: ximiowatch
+            exp_annotations:
+              summary: "Incomplete monitoring evaluation on sustained-incomplete"
+              description: "HTTP is available, but a configured functional or performance dimension has no valid latest observation for application app-a. This is not a confirmed business failure."
+      - eval_time: 70s
+        alertname: MonitorEvaluationIncomplete
+        exp_alerts:
+          - exp_labels:
+              monitor: sustained-incomplete
+              application: app-a
+              severity: warning
+              service: ximiowatch
+            exp_annotations:
+              summary: "Incomplete monitoring evaluation on sustained-incomplete"
+              description: "HTTP is available, but a configured functional or performance dimension has no valid latest observation for application app-a. This is not a confirmed business failure."
+      - eval_time: 70s
+        alertname: SilentApplicationFailure
+        exp_alerts: []
+      - eval_time: 70s
+        alertname: ApplicationPerformanceDegraded
+        exp_alerts: []
+      - eval_time: 70s
+        alertname: ApplicationHttpFailure
+        exp_alerts: []

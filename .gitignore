@@ -35,6 +35,17 @@ config/monitors.*.yml
 !config/monitors.example.yaml
 !config/monitors.*.example.yaml
 
+# Private Alertmanager / Telegram configuration and secrets
+alertmanager/private/
+alertmanager/secrets/
+alertmanager/*.local.yml
+alertmanager/*.local.yaml
+alertmanager/*telegram*.local.*
+alertmanager/*.token
+alertmanager/*.chat_id
+*.telegram_token
+*.chat_id
+
 # Private keys and certificates
 *.pem
 *.key
@@ -69,3 +80,7 @@ Thumbs.db
 grafana/data/
 prometheus/data/
 *.log
+
+# Verification fixtures, mock receiver and monitor configuration are intentionally
+# versioned because the documented Compose overlay mounts them at runtime. Only
+# generated artifacts and private configuration are excluded above.

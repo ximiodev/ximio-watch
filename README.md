@@ -76,7 +76,7 @@ config/monitors.yaml ──► MonitorEngine (asyncio, one task per monitor)
                               ├─► per-monitor HTTPX client ──► target application
                               ├─► Assertion engine (JSON/text/content, no eval)
                               ├─► Prometheus metrics ──► /metrics ──► Prometheus ──► Grafana
-                              ├─► Prometheus alert rules (/alerts)
+                              ├─► Prometheus alert rules (/alerts) ──► Alertmanager ──► controlled local webhook
                               ├─► JSON structured logs (stdout)
                               └─► OpenTelemetry spans (created locally; optional OTLP export)
 
@@ -86,6 +86,9 @@ demo-api (FastAPI) ── fictional scenarios with independently switchable busi
 The monitor service and demonstration API are separate processes. Prometheus
 scrapes XimioWatch every 5 seconds and evaluates alert rules every 5 seconds.
 Grafana provisions its Prometheus datasource and dashboard automatically.
+Alertmanager is added by a small optional Compose overlay and delivers local
+demo notifications only to a controlled webhook; no external notification
+destination is contacted.
 
 ## Technology stack
 
@@ -283,10 +286,14 @@ These protections do not make XimioWatch production-ready.
 - A deadline expiry produces the bounded `timeout` outcome. External task
   cancellation is a different event: it is re-raised, never converted into a
   successful or failed check, and never recorded as a completed check.
-- Freshness evaluation uses a conservative threshold of
-  `3 * interval_seconds + timeout_seconds + 5s` (the trailing 5 seconds accounts
-  for the Prometheus scrape interval). This remains valid because the timeout is
-  now an absolute bound rather than a per-operation limit.
+- Grafana keeps the Stage 3 freshness threshold of
+  `3 * interval_seconds + timeout_seconds + 5s` for dashboard compatibility.
+- Stage 4 alert rules use a more conservative threshold of
+  `3 * interval_seconds + timeout_seconds + 15s`. The 15-second margin covers the
+  5-second scrape interval, 5-second rule evaluation interval, fixed-delay
+  scheduling jitter and a short scrape retry window. The timeout remains an
+  absolute bound rather than a per-operation limit. Shared Prometheus recording
+  rules apply this policy and a 60-second process startup grace.
 
 ### HTTP execution safety
 
@@ -428,6 +435,7 @@ or application field values are exported.
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
+| `ximiowatch_startup_timestamp_seconds` | Gauge | Unix timestamp when this XimioWatch process started; global, with no monitor/application labels |
 | `ximiowatch_http_up` | Gauge | `1` when HTTP transport and status health passed, otherwise `0` |
 | `ximiowatch_functional_up` | Gauge | `1` for functional `UP`, `0` for functional `DOWN`; absent for `UNKNOWN` or `NOT CONFIGURED` |
 | `ximiowatch_functional_configured` | Gauge | `1` when the monitor defines business/content assertions, `0` otherwise |
@@ -461,6 +469,11 @@ Notes:
 - `not_evaluated` means HTTP succeeded but a configured dimension had no applicable
   assertion for this response. It is not a success and does not update the last
   fully healthy timestamp.
+- `ximiowatch_startup_timestamp_seconds` is written once when `Metrics` is created.
+  It exists because `monitor_interval_seconds` has no time origin: Prometheus
+  cannot otherwise distinguish a monitor that has never completed a first check
+  from a monitor whose series have not been scraped yet. It carries no monitor
+  labels and is never changed by monitor executions.
 - Counters and gauges are in-process and reset when XimioWatch restarts. Prometheus
   handles counter resets; historical continuity depends on Prometheus retention.
 
@@ -486,20 +499,152 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://your-collector:4318
 `OTEL_TRACES_EXPORTER` defaults to `none`. Only exporter setup, not a collector,
 is provided.
 
-## Prometheus alerting
+## Prometheus alerting and Alertmanager
 
-A small rules file is mounted from
-[`prometheus/rules/alerts.yml`](prometheus/rules/alerts.yml) and loaded by the
-existing Prometheus service. Thresholds are **demonstration defaults**, not
-production tuning.
+Prometheus loads [`prometheus/rules/recording.yml`](prometheus/rules/recording.yml)
+and the fast demo rules in [`prometheus/rules/alerts.yml`](prometheus/rules/alerts.yml).
+The proposed production thresholds live in
+[`prometheus/rules/alerts.production.yml`](prometheus/rules/alerts.production.yml)
+and are **not loaded by either demo configuration**. These are initial tuning
+values, not a claim of production readiness.
 
-| Alert | Condition | `for` |
-| --- | --- | --- |
-| `SilentApplicationFailure` | HTTP up, functional down, functional evaluated, recent measurement, XimioWatch target up | `30s` |
-| `XimioWatchUnavailable` | `up{job="ximiowatch"} == 0` | `30s` |
+The standalone demo uses [`prometheus/prometheus.yml`](prometheus/prometheus.yml),
+which deliberately has no `alerting:` section. The optional extended demo mounts
+[`prometheus/prometheus.alerting.yml`](prometheus/prometheus.alerting.yml), whose
+only difference is the `alertmanager:9093` delivery target. Both configurations
+load exactly the same two rule files and the same scrape configurations, so no
+alert rule is loaded twice or omitted.
 
-Alerts are visible at Prometheus `/alerts`. There is **no Alertmanager or
-notification integration** in this MVP.
+| Alert | Required eligibility | Demo `for` | Production `for` | Severity |
+| --- | --- | ---: | ---: | --- |
+| `ApplicationHttpFailure` | Recent completed observation with HTTP `DOWN`; exporter available | `10s` | `2m` | critical |
+| `SilentApplicationFailure` | HTTP `UP`, functional configured and evaluated, functional `DOWN`, fresh, exporter available | `15s` | `2m` | warning |
+| `ApplicationPerformanceDegraded` | HTTP `UP`, performance configured and evaluated, performance `DOWN`, fresh, exporter available; suppressed when functional failure is confirmed | `20s` | `5m` | warning |
+| `MonitorEvaluationIncomplete` | HTTP `UP`, fresh, a configured functional or performance dimension with no valid evaluation | `15s` | `2m` | warning |
+| `XimioWatchMonitorStale` | Last check older than the freshness window, or no first check after startup grace; exporter available | `10s` | `1m` | critical |
+| `XimioWatchUnavailable` | XimioWatch scrape target failing or absent | `10s` | `1m` | critical |
+
+The short demo intervals are chosen for fast local verification and are not
+production tuning. The production column is a separate, inactive rule file with
+longer `for` windows; it is validated but never loaded by either demo Compose
+configuration.
+
+`UNKNOWN` and `NOT CONFIGURED` never become healthy or confirmed application
+failures. Binary `*_up` gauges are absent for those states; the configured and
+evaluated indicators are authoritative. Stale observations cannot trigger
+confirmed application-state alerts, and exporter outages do not create
+per-monitor alert storms. All rule series keep only the bounded `monitor` and
+`application` labels; exporter-level alerts keep Prometheus's fixed `job` and
+`instance` labels.
+
+### Shared freshness recording rules
+
+`recording.yml` materially simplifies repeated eligibility logic:
+
+- `ximiowatch_monitor_fresh` requires a completed check at or after the process
+  startup timestamp, inside the conservative freshness window, while the
+  XimioWatch scrape target is up.
+- `ximiowatch_monitor_stale` covers absent first checks, observations from before
+  the current process start, and observations older than the window. It evaluates
+  only while the exporter is available and after the 60-second startup grace.
+- `ximiowatch_monitor_incomplete` requires HTTP `UP`, freshness, and a configured
+  functional/performance dimension whose latest observation was not evaluated.
+
+Exporter availability is aggregated with
+`count(up{job="ximiowatch"} == 1) > 0` before `on()` matching, preventing
+many-to-many matching if additional scrape instances are ever configured. The
+recorded series are explicitly reduced with `max by (monitor, application)`, so
+scrape-added `instance` and `job` labels are dropped and application-state
+alerts keep only bounded labels. `max` keeps the eligibility value at `1` even
+if more than one scrape target satisfies the condition.
+
+### Alertmanager architecture
+
+The standalone demo remains the fast local demonstration and does not require
+notification credentials:
+
+```bash
+docker compose up --build -d
+```
+
+In this mode Prometheus uses `prometheus.yml` without an Alertmanager target, so
+alert rules still evaluate in `/alerts` but no delivery is attempted and no
+repeated Alertmanager discovery errors are logged. Add Alertmanager and a
+controlled receiver with the Stage 4 overlay:
+
+```bash
+docker compose -p ximiowatch-stage4-verify \
+  -f docker-compose.yml \
+  -f docker-compose.alertmanager.yml up --build -d
+```
+
+PowerShell:
+
+```powershell
+docker compose -p ximiowatch-stage4-verify `
+  -f docker-compose.yml `
+  -f docker-compose.alertmanager.yml up --build -d
+```
+
+The overlay adds:
+
+- `prom/alertmanager:v0.35.1`, serving port `19393` on `127.0.0.1`.
+- A Prometheus config mount switch from `prometheus.yml` to
+  `prometheus.alerting.yml`; the standalone config is left unchanged.
+- A local mock webhook receiver on `127.0.0.1:18380`; Alertmanager posts firing
+  and resolved notifications to `http://mock-receiver:8080/notify`.
+- Deterministic local fixtures on `127.0.0.1:18302` and a verification-only
+  monitor configuration mounted read-only into XimioWatch.
+- XimioWatch, demo API, Prometheus and Grafana on loopback ports `18300`,
+  `18301`, `19390` and `13300`.
+
+Alertmanager groups by `alertname`, `application` and `monitor`, with
+`group_wait: 2s`, `group_interval: 10s`, `repeat_interval: 1m`. The webhook and
+Telegram integrations set `send_resolved: true` at the receiver level. Native
+Alertmanager silences can be created through its
+UI/API; no custom silence implementation exists.
+
+Inhibition suppresses notifications, not Prometheus evaluation:
+
+- `ApplicationHttpFailure` suppresses secondary performance, incomplete and
+  silent-failure notifications for the same `application` and `monitor`.
+- `SilentApplicationFailure` suppresses secondary performance and incomplete
+  notifications for the same `application` and `monitor`.
+- `XimioWatchUnavailable` suppresses all per-monitor notifications globally
+  because no per-monitor observation can be trusted during an exporter outage.
+
+Application-level rules include both `application` and `monitor` in `equal`, so
+one application or monitor cannot suppress an unrelated one. The exporter-level
+suppression is intentionally global.
+
+### Firing and resolved notifications
+
+A resolved notification means the **alert condition** is no longer true. It does
+not prove application recovery: observations can be missing, stale or
+unevaluated when a condition resolves. The sanitized template states this
+explicitly and includes status, severity, alert name, application, monitor,
+safe description and start time for each alert in a group.
+
+### Optional Telegram receiver
+
+[`alertmanager/alertmanager.telegram.example.yml`](alertmanager/alertmanager.telegram.example.yml)
+is sanitized and inactive by default. For a separately authorized deployment:
+
+1. Copy it to an ignored private path such as `alertmanager/alertmanager.local.yml`.
+2. Store the bot token in `alertmanager/private/telegram_bot_token` and the
+   private numeric chat ID in `alertmanager/private/telegram_chat_id`.
+3. Mount both private files and the private config read-only into Alertmanager.
+4. Keep `bot_token_file`, `chat_id_file` and `parse_mode: HTML`. Do not put the
+   token or chat ID inline and do not rely on shell environment expansion inside
+   Alertmanager YAML.
+5. Use a private chat, not a group or channel, unless separately authorized.
+
+The repository ignores `alertmanager/private/`, local Telegram configs, token
+files and chat-ID files in both Git and Docker build contexts. Dynamic values in
+[`alertmanager/templates/ximiowatch.tmpl`](alertmanager/templates/ximiowatch.tmpl)
+are HTML-escaped. No raw response body, header, private URL, credential or
+customer value is placed in notifications. **No real Telegram bot was created and
+no Telegram message was sent in Stage 4.**
 
 ## Simulated failure scenarios
 
@@ -539,6 +684,139 @@ posting `{"enabled":false}`.
 
 During a silent failure, expect `http_up = 1`, `functional_up = 0`, an incremented
 `silent_failures_total`, and demo `/healthz` still reporting `"status":"ok"`.
+
+## Stage 4 alert verification
+
+Behavioral rule tests are the authoritative check for alert eligibility and
+timing:
+
+```bash
+docker run --rm --entrypoint promtool \
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 \
+  test rules prometheus/rules/tests/demo_alerts_test.yml
+docker run --rm --entrypoint promtool \
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 \
+  test rules prometheus/rules/tests/production_alerts_test.yml
+```
+
+PowerShell:
+
+```powershell
+docker run --rm --entrypoint promtool `
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 `
+  test rules prometheus/rules/tests/demo_alerts_test.yml
+docker run --rm --entrypoint promtool `
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 `
+  test rules prometheus/rules/tests/production_alerts_test.yml
+```
+
+The test inputs include scrape-added `job` and `instance` labels on all raw
+engine series, while expected application alerts contain only `monitor`,
+`application`, `severity` and `service`. This guards against unbounded labels
+leaking into Alertmanager.
+
+The verification assets mounted by the overlay — `verification/fixtures.py`,
+`verification/mock_receiver.py` and `verification/monitors.yaml` — are
+intentionally versioned. They are excluded from Docker build contexts by
+`.dockerignore`, not from Git by `.gitignore`. Confirm this with
+`git check-ignore -v verification/fixtures.py verification/mock_receiver.py verification/monitors.yaml`
+(no output means not ignored) and `git ls-files verification`.
+
+Notification counts in `/events` are cumulative for the life of the mock
+receiver unless `/reset` is called. Alertmanager delivery is eventually
+consistent with Prometheus evaluation: an `/api/v2/alerts` sample taken
+immediately after a Prometheus transition can still lag behind. In the earlier
+three-monitor run, `prom_firing=3` but `am_active=1` was a sampling-time
+observation, not a grouping change. The reported four firing and four resolved
+notifications for `SilentApplicationFailure` were cumulative: one from the
+earlier single silent fixture plus three from the three demo monitors. A clean
+run with only the three demo monitors produces three firing and three resolved
+notifications, one per distinct monitor identity. Inspect
+`Alertmanager /api/v2/alerts/groups` for grouped delivery keys.
+
+Configuration validation uses the same pinned images as the integrated run:
+
+```bash
+docker run --rm --entrypoint promtool \
+  -v "${PWD}:/workspace" -w /workspace \
+  -v "${PWD}/prometheus/rules:/etc/prometheus/rules:ro" \
+  prom/prometheus:v3.2.1 check config /workspace/prometheus/prometheus.yml
+docker run --rm --entrypoint promtool \
+  -v "${PWD}:/workspace" -w /workspace \
+  -v "${PWD}/prometheus/rules:/etc/prometheus/rules:ro" \
+  prom/prometheus:v3.2.1 check config /workspace/prometheus/prometheus.alerting.yml
+docker run --rm --entrypoint promtool \
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 \
+  check rules /workspace/prometheus/rules/recording.yml \
+    /workspace/prometheus/rules/alerts.yml \
+    /workspace/prometheus/rules/alerts.production.yml
+docker run --rm --entrypoint amtool \
+  -v "${PWD}:/workspace" -w /workspace prom/alertmanager:v0.35.1 \
+  check-config /workspace/alertmanager/alertmanager.yml
+docker compose -f docker-compose.yml -f docker-compose.alertmanager.yml config -q
+```
+
+PowerShell:
+
+```powershell
+docker run --rm --entrypoint promtool `
+  -v "${PWD}:/workspace" -w /workspace `
+  -v "${PWD}/prometheus/rules:/etc/prometheus/rules:ro" `
+  prom/prometheus:v3.2.1 check config /workspace/prometheus/prometheus.yml
+docker run --rm --entrypoint promtool `
+  -v "${PWD}:/workspace" -w /workspace `
+  -v "${PWD}/prometheus/rules:/etc/prometheus/rules:ro" `
+  prom/prometheus:v3.2.1 check config /workspace/prometheus/prometheus.alerting.yml
+docker run --rm --entrypoint promtool `
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 `
+  check rules /workspace/prometheus/rules/recording.yml `
+    /workspace/prometheus/rules/alerts.yml `
+    /workspace/prometheus/rules/alerts.production.yml
+docker run --rm --entrypoint amtool `
+  -v "${PWD}:/workspace" -w /workspace prom/alertmanager:v0.35.1 `
+  check-config /workspace/alertmanager/alertmanager.yml
+docker compose -f docker-compose.yml -f docker-compose.alertmanager.yml config -q
+```
+
+For an isolated integrated run, start the overlay with the unique project name
+shown above, then inspect Prometheus `/api/v1/alerts`, Alertmanager `/api/v2/alerts`
+and the mock receiver `/events` endpoint. Trigger the three original demo
+scenarios through the demo API on port `18301`. The local fixtures on port `18302`
+are controlled at runtime, for example
+`http://localhost:18302/control/http/enable` and
+`http://localhost:18302/control/http/disable`; the same pattern covers `silent`,
+`performance`, `incomplete` and `stale`. `GET /control` reports the current state.
+The `stale` probe is held open from process start and is re-enabled by
+`GET /reset` so the never-first-check scenario can be reproduced. After testing,
+reset both the demo API and fixture controls and remove the project:
+
+Bash:
+
+```bash
+for scenario in restaurant_catalog fiscal_authorization device_data_freshness; do
+  curl -fsS -X POST \
+    "http://localhost:18301/simulation/${scenario}/failure" \
+    -H 'Content-Type: application/json' -d '{"enabled":false}' >/dev/null
+done
+curl -fsS http://localhost:18302/reset >/dev/null
+curl -fsS http://localhost:18380/events
+docker compose -p ximiowatch-stage4-verify \
+  -f docker-compose.yml -f docker-compose.alertmanager.yml down -v
+```
+
+PowerShell:
+
+```powershell
+foreach ($scenario in 'restaurant_catalog','fiscal_authorization','device_data_freshness') {
+  Invoke-RestMethod -Method Post `
+    -Uri "http://localhost:18301/simulation/$scenario/failure" `
+    -ContentType 'application/json' -Body '{"enabled":false}' | Out-Null
+}
+Invoke-RestMethod http://localhost:18302/reset | Out-Null
+Invoke-RestMethod http://localhost:18380/events
+docker compose -p ximiowatch-stage4-verify `
+  -f docker-compose.yml -f docker-compose.alertmanager.yml down -v
+```
 
 ## Grafana dashboard
 
@@ -585,7 +863,10 @@ external-cancellation propagation, redirect behavior, state-aware and exact-once
 metric recording, sanitized diagnostics, secret-safe configuration errors, method/URL
 validation, background startup, initial unknown state, graceful shutdown,
 build-context hygiene, alert rule structure, monitor isolation, environment expansion,
-recovery and the direct `/metrics` endpoint.
+recovery, the direct `/metrics` endpoint, the global startup timestamp, Alertmanager
+routing/inhibition configuration, Telegram example secret handling and local mock
+receiver boundaries. Behavioral alert timing and state transitions are covered by
+the `promtool test rules` suites described above, not by structural YAML tests.
 
 GitHub Actions runs the same suite on Python 3.12 via
 [`.github/workflows/tests.yml`](.github/workflows/tests.yml). Secret scanning runs
@@ -598,8 +879,9 @@ separately via
    monitors green and demo `/healthz` returning `ok`.
 2. **HTTP 200 with broken business response** — trigger Scenario A. Show that the
    catalog endpoint still returns HTTP 200 but `functional_up` becomes `0`.
-3. **Prometheus alert transition** — wait ~30 seconds and show
-   `SilentApplicationFailure` moving from pending to firing at Prometheus `/alerts`.
+3. **Prometheus alert transition** — wait ~15 seconds with the fast demo rules
+   and show `SilentApplicationFailure` moving from pending to firing at
+   Prometheus `/alerts`.
 4. **Application recovery** — disable the scenario; show `functional_up = 1`,
    `consecutive_failures = 0`, and the alert resolving.
 5. **Monitoring-engine unavailability** — `docker compose stop ximiowatch`, wait
@@ -622,7 +904,15 @@ separately via
   and browser-based assertions are not supported.
 - Conditional skips are represented as `UNKNOWN`, not healthy. Operators should add
   standalone guard assertions when a skipped branch could hide a broken workflow.
-- No notification channels; Prometheus alerts are visible only in `/alerts`.
+- Notifications are demonstrated only through a local mock webhook. Production
+  delivery and real Telegram delivery are not configured or verified.
+- A completely unavailable Prometheus or Alertmanager instance cannot reliably
+  notify through its own alerting pipeline. Independent external monitoring of
+  the monitoring infrastructure belongs to a later deployment stage.
+- Alertmanager cannot notify about its own total failure, and a severe exporter
+  outage intentionally suppresses per-monitor notifications to avoid storms.
+- Five-minute dashboard lookback can still remove monitor identities during a
+  long exporter outage, as described above.
 - No database, authentication, user management, custom frontend or multi-tenancy.
 - No Kubernetes, Terraform or cloud deployment.
 - No trace backend or trace visualization in the MVP.

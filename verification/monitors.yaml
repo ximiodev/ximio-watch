@@ -1,0 +1,129 @@
+# Stage 4 integration-verification monitors only.
+# All URLs are internal Compose service names or fictional local fixtures.
+# No production endpoint, real credential or customer data is present.
+
+monitors:
+  # Original three silent-failure scenarios, preserved for regression checks.
+  - name: restaurant_catalog
+    application: demo-kitchen
+    url: "${DEMO_API_URL:http://demo-api:8001}/scenarios/restaurant-catalog"
+    method: GET
+    headers:
+      X-Demo-Token: "${DEMO_TOKEN:demo-token}"
+    interval_seconds: 10
+    timeout_seconds: 2
+    assertions:
+      - type: http_status
+        value: 200
+      - type: json_not_empty
+        path: products
+      - type: json_equals
+        path: status
+        value: ready
+
+  - name: fiscal_authorization
+    application: demo-billing
+    url: "${DEMO_API_URL:http://demo-api:8001}/scenarios/fiscal-authorization"
+    method: GET
+    headers:
+      X-Demo-Token: "${DEMO_TOKEN:demo-token}"
+    interval_seconds: 10
+    timeout_seconds: 2
+    assertions:
+      - type: http_status
+        value: 200
+      - type: json_equals
+        path: authorized
+        value: true
+      - type: conditional
+        when:
+          type: json_equals
+          path: authorized
+          value: true
+        then:
+          type: json_exists
+          path: authorization_code
+
+  - name: device_data_freshness
+    application: demo-iot
+    url: "${DEMO_API_URL:http://demo-api:8001}/scenarios/device-data-freshness"
+    method: GET
+    headers:
+      X-Demo-Token: "${DEMO_TOKEN:demo-token}"
+    interval_seconds: 10
+    timeout_seconds: 2
+    assertions:
+      - type: http_status
+        value: 200
+      - type: numeric_lt
+        path: last_event_age_seconds
+        value: 300
+
+  # Deterministic fixtures for each remaining Stage 4 alert class.
+  - name: stage4_http_failure
+    application: stage4-http
+    url: "http://fixtures:8002/probe/http"
+    interval_seconds: 5
+    timeout_seconds: 2
+    assertions:
+      - type: http_status
+        value: 200
+
+  - name: stage4_silent_failure
+    application: stage4-silent
+    url: "http://fixtures:8002/probe/silent"
+    interval_seconds: 5
+    timeout_seconds: 2
+    assertions:
+      - type: http_status
+        value: 200
+      - type: json_not_empty
+        path: products
+
+  - name: stage4_performance
+    application: stage4-performance
+    url: "http://fixtures:8002/probe/performance"
+    interval_seconds: 5
+    timeout_seconds: 5
+    assertions:
+      - type: http_status
+        value: 200
+      - type: max_response_time
+        value: 0.2
+
+  - name: stage4_incomplete
+    application: stage4-incomplete
+    url: "http://fixtures:8002/probe/incomplete"
+    interval_seconds: 5
+    timeout_seconds: 2
+    assertions:
+      - type: http_status
+        value: 200
+      - type: conditional
+        when:
+          type: json_equals
+          path: strict
+          value: true
+        then:
+          type: json_exists
+          path: code
+
+  - name: stage4_stale_probe
+    application: stage4-stale
+    url: "http://fixtures:8002/probe/stale"
+    interval_seconds: 30
+    timeout_seconds: 120
+    assertions:
+      - type: http_status
+        value: 200
+
+  - name: stage4_healthy_isolated
+    application: stage4-isolated
+    url: "http://fixtures:8002/probe/healthy"
+    interval_seconds: 5
+    timeout_seconds: 2
+    assertions:
+      - type: http_status
+        value: 200
+      - type: json_not_empty
+        path: products

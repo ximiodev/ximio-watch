@@ -1,38 +1,116 @@
-# Demonstration alerting thresholds only. No notification integration is included.
+# Fast demonstration thresholds. Production thresholds are in alerts.production.yml.
+# Shared freshness and eligibility logic lives in recording.yml.
+# These expressions use only bounded monitor/application labels and never treat
+# UNKNOWN or NOT CONFIGURED as healthy or as a confirmed failure.
+
 groups:
-  - name: ximiowatch-mvp
+  - name: ximiowatch-demo-alerts
     rules:
+      - alert: ApplicationHttpFailure
+        expr: |
+          (
+            max by (monitor, application) (ximiowatch_http_up == 0)
+            and on(monitor, application) ximiowatch_monitor_fresh == 1
+          )
+        for: 10s
+        labels:
+          severity: critical
+          service: ximiowatch
+        annotations:
+          summary: "Application HTTP failure on {{ $labels.monitor }}"
+          description: >-
+            A recent completed observation reported HTTP DOWN for application
+            {{ $labels.application }}. Transport, timeout, TLS and unexpected
+            status failures are all included.
+
       - alert: SilentApplicationFailure
         expr: |
           (
-            ximiowatch_http_up == 1
-            and on(monitor, application) (ximiowatch_functional_up == 0)
-            and on(monitor, application) (ximiowatch_functional_evaluated == 1)
+            max by (monitor, application) (ximiowatch_functional_up == 0)
             and on(monitor, application)
-              (time() - ximiowatch_last_check_timestamp_seconds
-                < (3 * ximiowatch_monitor_interval_seconds
-                   + ximiowatch_monitor_timeout_seconds + 5))
-            and on() (up{job="ximiowatch"} == 1)
+              max by (monitor, application) (ximiowatch_http_up == 1)
+            and on(monitor, application)
+              max by (monitor, application) (ximiowatch_functional_configured == 1)
+            and on(monitor, application)
+              max by (monitor, application) (ximiowatch_functional_evaluated == 1)
+            and on(monitor, application) ximiowatch_monitor_fresh == 1
           )
-        for: 30s
+        for: 15s
         labels:
           severity: warning
           service: ximiowatch
         annotations:
           summary: "Silent application failure on {{ $labels.monitor }}"
           description: >-
-            HTTP is available but business/content assertions are failing for
-            application {{ $labels.application }}. Measurement is recent and the
-            XimioWatch exporter is scrapeable.
+            HTTP is available but evaluated business/content assertions are
+            failing for application {{ $labels.application }}. The observation
+            is recent and the exporter is available.
 
-      - alert: XimioWatchUnavailable
-        expr: up{job="ximiowatch"} == 0
-        for: 30s
+      - alert: ApplicationPerformanceDegraded
+        expr: |
+          (
+            max by (monitor, application) (ximiowatch_performance_up == 0)
+            and on(monitor, application)
+              max by (monitor, application) (ximiowatch_http_up == 1)
+            and on(monitor, application)
+              max by (monitor, application) (ximiowatch_performance_configured == 1)
+            and on(monitor, application)
+              max by (monitor, application) (ximiowatch_performance_evaluated == 1)
+            and on(monitor, application) ximiowatch_monitor_fresh == 1
+            unless on(monitor, application)
+              max by (monitor, application) (ximiowatch_functional_up == 0)
+          )
+        for: 20s
+        labels:
+          severity: warning
+          service: ximiowatch
+        annotations:
+          summary: "Application performance degraded on {{ $labels.monitor }}"
+          description: >-
+            A recent observation breached a configured response-time threshold
+            for application {{ $labels.application }} while HTTP was available.
+            Confirmed functional failures are handled separately.
+
+      - alert: MonitorEvaluationIncomplete
+        expr: |
+          ximiowatch_monitor_incomplete == 1
+        for: 15s
+        labels:
+          severity: warning
+          service: ximiowatch
+        annotations:
+          summary: "Incomplete monitoring evaluation on {{ $labels.monitor }}"
+          description: >-
+            HTTP is available, but a configured functional or performance
+            dimension has no valid latest observation for application
+            {{ $labels.application }}. This is not a confirmed business failure.
+
+      - alert: XimioWatchMonitorStale
+        expr: |
+          ximiowatch_monitor_stale == 1
+        for: 10s
         labels:
           severity: critical
           service: ximiowatch
         annotations:
-          summary: "XimioWatch Prometheus target is unavailable"
+          summary: "Stale monitor observation for {{ $labels.monitor }}"
           description: >-
-            The ximiowatch scrape target has been down for 30 seconds. Monitor
-            gauges may be stale; do not interpret them as current application health.
+            No recent completed observation exists for monitor
+            {{ $labels.monitor }} in application {{ $labels.application }}.
+            Confirmed application-state alerts are suppressed for stale data.
+
+      - alert: XimioWatchUnavailable
+        expr: |
+          (
+            up{job="ximiowatch"} == 0
+            or absent(up{job="ximiowatch"})
+          )
+        for: 10s
+        labels:
+          severity: critical
+          service: ximiowatch
+        annotations:
+          summary: "XimioWatch exporter unavailable"
+          description: >-
+            The configured XimioWatch scrape target is failing or absent.
+            Per-monitor alerts are suppressed while the exporter is unavailable.

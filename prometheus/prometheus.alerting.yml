@@ -1,0 +1,24 @@
+# Optional extended-demo configuration used by docker-compose.alertmanager.yml.
+# This is the only difference from the standalone prometheus.yml: it adds the
+# Alertmanager delivery target. Rule files and scrape configurations are identical.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/rules/recording.yml
+  - /etc/prometheus/rules/alerts.yml
+
+scrape_configs:
+  - job_name: ximiowatch
+    static_configs:
+      - targets: ["ximiowatch:8000"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

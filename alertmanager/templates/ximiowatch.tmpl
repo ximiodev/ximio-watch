@@ -1,0 +1,31 @@
+{{/* Sanitized Telegram-oriented template. Dynamic values are HTML-escaped. */}}
+{{ define "ximiowatch.telegram.message" -}}
+{{ if eq .Status "firing" -}}
+<b>Status:</b> firing - alert condition is active.
+{{ else -}}
+<b>Status:</b> resolved - the alert condition resolved. This does not prove application recovery when observations are missing or evaluation is unavailable.
+{{ end -}}
+{{ if .CommonLabels.severity -}}
+<b>Severity:</b> {{ .CommonLabels.severity | html }}
+{{ else -}}
+<b>Severity:</b> unknown
+{{ end -}}
+{{ range .Alerts -}}
+<b>Alert:</b> {{ .Labels.alertname | html }}
+{{ with .Labels.application -}}
+<b>Application:</b> {{ . | html }}
+{{ end -}}
+{{ with .Labels.monitor -}}
+<b>Monitor:</b> {{ . | html }}
+{{ end -}}
+{{ with .Annotations.summary -}}
+<b>Summary:</b> {{ . | html }}
+{{ end -}}
+{{ with .Annotations.description -}}
+<b>Description:</b> {{ . | html }}
+{{ end -}}
+{{ with .StartsAt -}}
+<b>Started:</b> {{ .Format "2006-01-02T15:04:05Z07:00" | html }}
+{{ end -}}
+{{ end -}}
+{{ end -}}

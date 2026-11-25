@@ -1,0 +1,49 @@
+# Optional, sanitized Telegram receiver example. INACTIVE in the demo stack.
+# Copy to a private path and replace only the private file paths locally.
+# Alertmanager does not expand shell environment variables inside this YAML.
+# The token and chat ID must be supplied through read-only file mounts.
+
+global:
+  resolve_timeout: 5m
+
+templates:
+  - templates/*.tmpl
+
+route:
+  receiver: telegram
+  group_by: ['alertname', 'application', 'monitor']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/private/telegram_bot_token
+        chat_id_file: /etc/alertmanager/private/telegram_chat_id
+        parse_mode: HTML
+        send_resolved: true
+        message: '{{ template "ximiowatch.telegram.message" . }}'
+
+inhibit_rules:
+  - name: http-failure-suppresses-secondary-symptoms
+    source_matchers:
+      - 'alertname="ApplicationHttpFailure"'
+    target_matchers:
+      - 'alertname=~"ApplicationPerformanceDegraded|MonitorEvaluationIncomplete|SilentApplicationFailure"'
+    equal: ['application', 'monitor']
+
+  - name: functional-failure-suppresses-secondary-symptoms
+    source_matchers:
+      - 'alertname="SilentApplicationFailure"'
+    target_matchers:
+      - 'alertname=~"ApplicationPerformanceDegraded|MonitorEvaluationIncomplete"'
+    equal: ['application', 'monitor']
+
+  # Exporter unavailability invalidates every per-monitor observation, so this
+  # suppression is intentionally global rather than application-scoped.
+  - name: exporter-unavailable-suppresses-per-monitor-alerts
+    source_matchers:
+      - 'alertname="XimioWatchUnavailable"'
+    target_matchers:
+      - 'alertname=~"ApplicationHttpFailure|SilentApplicationFailure|ApplicationPerformanceDegraded|MonitorEvaluationIncomplete|XimioWatchMonitorStale"'

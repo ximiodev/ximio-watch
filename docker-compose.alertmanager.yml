@@ -1,0 +1,72 @@
+# Stage 4 isolated alerting/notification verification overlay.
+# Use only with docker-compose.yml and a unique -p project name.
+# Every published port is bound to loopback.
+
+services:
+  ximiowatch:
+    ports: !override
+      - "127.0.0.1:${STAGE4_XIMIOWATCH_PORT:-18300}:8000"
+    environment:
+      XIMIOWATCH_CONFIG: /app/config/monitors.stage4.yaml
+    volumes:
+      - ./verification/monitors.yaml:/app/config/monitors.stage4.yaml:ro
+    depends_on:
+      demo-api:
+        condition: service_healthy
+      fixtures:
+        condition: service_started
+
+  demo-api:
+    ports: !override
+      - "127.0.0.1:${STAGE4_DEMO_API_PORT:-18301}:8001"
+
+  fixtures:
+    image: python:3.12-slim
+    working_dir: /app
+    command: ["python", "/app/fixtures.py"]
+    volumes:
+      - ./verification/fixtures.py:/app/fixtures.py:ro
+    ports:
+      - "127.0.0.1:${STAGE4_FIXTURES_PORT:-18302}:8002"
+
+  prometheus:
+    ports: !override
+      - "127.0.0.1:${STAGE4_PROMETHEUS_PORT:-19390}:9090"
+    volumes: !override
+      - ./prometheus/prometheus.alerting.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+    depends_on:
+      ximiowatch:
+        condition: service_started
+      alertmanager:
+        condition: service_started
+
+  grafana:
+    ports: !override
+      - "127.0.0.1:${STAGE4_GRAFANA_PORT:-13300}:3000"
+
+  alertmanager:
+    image: prom/alertmanager:v0.35.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.listen-address=0.0.0.0:9093
+      - --cluster.listen-address=
+    ports:
+      - "127.0.0.1:${STAGE4_ALERTMANAGER_PORT:-19393}:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./alertmanager/templates:/etc/alertmanager/templates:ro
+    depends_on:
+      - mock-receiver
+
+  mock-receiver:
+    image: python:3.12-slim
+    working_dir: /app
+    command: ["python", "/app/mock_receiver.py"]
+    environment:
+      MOCK_RECEIVER_EVENTS: /tmp/ximiowatch-stage4-events.jsonl
+    volumes:
+      - ./verification/mock_receiver.py:/app/mock_receiver.py:ro
+    ports:
+      - "127.0.0.1:${STAGE4_MOCK_RECEIVER_PORT:-18380}:8080"

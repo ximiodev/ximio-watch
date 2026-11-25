@@ -1,0 +1,73 @@
+name: alerting
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  alerting-configuration:
+    name: Alerting configuration and rules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Validate standalone Prometheus configuration
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$GITHUB_WORKSPACE/prometheus/rules:/etc/prometheus/rules:ro" \
+            -w /workspace \
+            prom/prometheus:v3.2.1 \
+            check config /workspace/prometheus/prometheus.yml
+
+      - name: Validate alerting Prometheus configuration
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$GITHUB_WORKSPACE/prometheus/rules:/etc/prometheus/rules:ro" \
+            -w /workspace \
+            prom/prometheus:v3.2.1 \
+            check config /workspace/prometheus/prometheus.alerting.yml
+
+      - name: Validate Prometheus rule files
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            prom/prometheus:v3.2.1 \
+            check rules \
+              /workspace/prometheus/rules/recording.yml \
+              /workspace/prometheus/rules/alerts.yml \
+              /workspace/prometheus/rules/alerts.production.yml
+
+      - name: Test Prometheus rule behavior
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            prom/prometheus:v3.2.1 \
+            test rules prometheus/rules/tests/demo_alerts_test.yml
+          docker run --rm --entrypoint promtool \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            prom/prometheus:v3.2.1 \
+            test rules prometheus/rules/tests/production_alerts_test.yml
+
+      - name: Validate committed Alertmanager configurations
+        run: |
+          docker run --rm --entrypoint amtool \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            prom/alertmanager:v0.35.1 \
+            check-config /workspace/alertmanager/alertmanager.yml
+          docker run --rm --entrypoint amtool \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            prom/alertmanager:v0.35.1 \
+            check-config /workspace/alertmanager/alertmanager.telegram.example.yml
