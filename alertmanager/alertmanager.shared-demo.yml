@@ -1,0 +1,36 @@
+# Safe shared-server demo configuration. The receiver has no notification
+# integration, so alerts are visible in Alertmanager but are never delivered
+# externally. Silences and notification state remain in the project volume.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: local-only-no-destination
+  group_by: ['alertname', 'application', 'monitor']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: local-only-no-destination
+
+inhibit_rules:
+  - name: http-failure-suppresses-secondary-symptoms
+    source_matchers:
+      - 'alertname="ApplicationHttpFailure"'
+    target_matchers:
+      - 'alertname=~"ApplicationPerformanceDegraded|MonitorEvaluationIncomplete|SilentApplicationFailure"'
+    equal: ['application', 'monitor']
+
+  - name: functional-failure-suppresses-secondary-symptoms
+    source_matchers:
+      - 'alertname="SilentApplicationFailure"'
+    target_matchers:
+      - 'alertname=~"ApplicationPerformanceDegraded|MonitorEvaluationIncomplete"'
+    equal: ['application', 'monitor']
+
+  - name: exporter-unavailable-suppresses-per-monitor-alerts
+    source_matchers:
+      - 'alertname="XimioWatchUnavailable"'
+    target_matchers:
+      - 'alertname=~"ApplicationHttpFailure|SilentApplicationFailure|ApplicationPerformanceDegraded|MonitorEvaluationIncomplete|XimioWatchMonitorStale"'

@@ -1,7 +1,7 @@
 # PromQL rule tests for the fast demonstration thresholds.
 # Run from the repository root with:
 #   docker run --rm --entrypoint promtool -v "${PWD}:/workspace" -w /workspace \
-#     prom/prometheus:v3.2.1 test rules prometheus/rules/tests/demo_alerts_test.yml
+#     prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 test rules prometheus/rules/tests/demo_alerts_test.yml
 
 rule_files:
   - ../recording.yml

@@ -33,7 +33,7 @@ services:
       start_period: 5s
 
   prometheus:
-    image: prom/prometheus:v3.2.1
+    image: prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
     ports:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     volumes:
@@ -43,7 +43,7 @@ services:
       - ximiowatch
 
   grafana:
-    image: grafana/grafana:11.6.0
+    image: grafana/grafana:12.4.16@sha256:982fa6bf18cc38280a30bf08c3b673486067d4805b25a9d4756688a689a993c7
     ports:
       - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     environment:

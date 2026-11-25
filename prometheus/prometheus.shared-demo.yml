@@ -1,0 +1,25 @@
+# Persistent shared-server demo configuration.
+# Scrape and evaluation intervals are intentionally conservative for a shared
+# VPS. Adjust them here without touching application code. Retention time and
+# size are configured through docker-compose.shared-demo.yml command flags.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 5s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/rules/recording.yml
+  - /etc/prometheus/rules/alerts.yml
+
+scrape_configs:
+  - job_name: ximiowatch
+    static_configs:
+      - targets: ["ximiowatch:8000"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

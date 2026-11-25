@@ -139,6 +139,17 @@ docker compose up -d
 
 Stop and remove the environment with `docker compose down`.
 
+## Persistent shared-server demo
+
+For a resource-constrained, persistent demo on an existing shared VPS, use
+[`docker-compose.shared-demo.yml`](docker-compose.shared-demo.yml) and follow
+[`docs/shared-vps-deployment.md`](docs/shared-vps-deployment.md). That stack is
+separate from the standalone and verification overlays, uses the project name
+`ximiowatch-demo`, loopback-only ports, project-scoped volumes, explicit CPU and
+memory limits, bounded logging, and a safe Alertmanager receiver with no
+external delivery. It requires a non-default Grafana password supplied through a
+file. It is a demonstration deployment, not the final production design.
+
 For local development without Docker:
 
 ```bash
@@ -588,7 +599,7 @@ docker compose -p ximiowatch-stage4-verify `
 
 The overlay adds:
 
-- `prom/alertmanager:v0.35.1`, serving port `19393` on `127.0.0.1`.
+- `prom/alertmanager:v0.35.1@sha256:4e3d029e69c7f61dd53a2b31a3dc427a2b81736cffca185c0854075e07969e36`, serving port `19393` on `127.0.0.1`.
 - A Prometheus config mount switch from `prometheus.yml` to
   `prometheus.alerting.yml`; the standalone config is left unchanged.
 - A local mock webhook receiver on `127.0.0.1:18380`; Alertmanager posts firing
@@ -692,10 +703,10 @@ timing:
 
 ```bash
 docker run --rm --entrypoint promtool \
-  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 \
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 \
   test rules prometheus/rules/tests/demo_alerts_test.yml
 docker run --rm --entrypoint promtool \
-  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 \
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 \
   test rules prometheus/rules/tests/production_alerts_test.yml
 ```
 
@@ -703,10 +714,10 @@ PowerShell:
 
 ```powershell
 docker run --rm --entrypoint promtool `
-  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 `
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 `
   test rules prometheus/rules/tests/demo_alerts_test.yml
 docker run --rm --entrypoint promtool `
-  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 `
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 `
   test rules prometheus/rules/tests/production_alerts_test.yml
 ```
 
@@ -740,18 +751,18 @@ Configuration validation uses the same pinned images as the integrated run:
 docker run --rm --entrypoint promtool \
   -v "${PWD}:/workspace" -w /workspace \
   -v "${PWD}/prometheus/rules:/etc/prometheus/rules:ro" \
-  prom/prometheus:v3.2.1 check config /workspace/prometheus/prometheus.yml
+  prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 check config /workspace/prometheus/prometheus.yml
 docker run --rm --entrypoint promtool \
   -v "${PWD}:/workspace" -w /workspace \
   -v "${PWD}/prometheus/rules:/etc/prometheus/rules:ro" \
-  prom/prometheus:v3.2.1 check config /workspace/prometheus/prometheus.alerting.yml
+  prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 check config /workspace/prometheus/prometheus.alerting.yml
 docker run --rm --entrypoint promtool \
-  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 \
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 \
   check rules /workspace/prometheus/rules/recording.yml \
     /workspace/prometheus/rules/alerts.yml \
     /workspace/prometheus/rules/alerts.production.yml
 docker run --rm --entrypoint amtool \
-  -v "${PWD}:/workspace" -w /workspace prom/alertmanager:v0.35.1 \
+  -v "${PWD}:/workspace" -w /workspace prom/alertmanager:v0.35.1@sha256:4e3d029e69c7f61dd53a2b31a3dc427a2b81736cffca185c0854075e07969e36 \
   check-config /workspace/alertmanager/alertmanager.yml
 docker compose -f docker-compose.yml -f docker-compose.alertmanager.yml config -q
 ```
@@ -762,18 +773,18 @@ PowerShell:
 docker run --rm --entrypoint promtool `
   -v "${PWD}:/workspace" -w /workspace `
   -v "${PWD}/prometheus/rules:/etc/prometheus/rules:ro" `
-  prom/prometheus:v3.2.1 check config /workspace/prometheus/prometheus.yml
+  prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 check config /workspace/prometheus/prometheus.yml
 docker run --rm --entrypoint promtool `
   -v "${PWD}:/workspace" -w /workspace `
   -v "${PWD}/prometheus/rules:/etc/prometheus/rules:ro" `
-  prom/prometheus:v3.2.1 check config /workspace/prometheus/prometheus.alerting.yml
+  prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 check config /workspace/prometheus/prometheus.alerting.yml
 docker run --rm --entrypoint promtool `
-  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.2.1 `
+  -v "${PWD}:/workspace" -w /workspace prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 `
   check rules /workspace/prometheus/rules/recording.yml `
     /workspace/prometheus/rules/alerts.yml `
     /workspace/prometheus/rules/alerts.production.yml
 docker run --rm --entrypoint amtool `
-  -v "${PWD}:/workspace" -w /workspace prom/alertmanager:v0.35.1 `
+  -v "${PWD}:/workspace" -w /workspace prom/alertmanager:v0.35.1@sha256:4e3d029e69c7f61dd53a2b31a3dc427a2b81736cffca185c0854075e07969e36 `
   check-config /workspace/alertmanager/alertmanager.yml
 docker compose -f docker-compose.yml -f docker-compose.alertmanager.yml config -q
 ```

@@ -23,7 +23,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$GITHUB_WORKSPACE/prometheus/rules:/etc/prometheus/rules:ro" \
             -w /workspace \
-            prom/prometheus:v3.2.1 \
+            prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 \
             check config /workspace/prometheus/prometheus.yml
 
       - name: Validate alerting Prometheus configuration
@@ -32,15 +32,24 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$GITHUB_WORKSPACE/prometheus/rules:/etc/prometheus/rules:ro" \
             -w /workspace \
-            prom/prometheus:v3.2.1 \
+            prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 \
             check config /workspace/prometheus/prometheus.alerting.yml
+
+      - name: Validate shared demo Prometheus configuration
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$GITHUB_WORKSPACE/prometheus/rules:/etc/prometheus/rules:ro" \
+            -w /workspace \
+            prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 \
+            check config /workspace/prometheus/prometheus.shared-demo.yml
 
       - name: Validate Prometheus rule files
         run: |
           docker run --rm --entrypoint promtool \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
-            prom/prometheus:v3.2.1 \
+            prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 \
             check rules \
               /workspace/prometheus/rules/recording.yml \
               /workspace/prometheus/rules/alerts.yml \
@@ -51,12 +60,12 @@ jobs:
           docker run --rm --entrypoint promtool \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
-            prom/prometheus:v3.2.1 \
+            prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 \
             test rules prometheus/rules/tests/demo_alerts_test.yml
           docker run --rm --entrypoint promtool \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
-            prom/prometheus:v3.2.1 \
+            prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 \
             test rules prometheus/rules/tests/production_alerts_test.yml
 
       - name: Validate committed Alertmanager configurations
@@ -64,10 +73,21 @@ jobs:
           docker run --rm --entrypoint amtool \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
-            prom/alertmanager:v0.35.1 \
+            prom/alertmanager:v0.35.1@sha256:4e3d029e69c7f61dd53a2b31a3dc427a2b81736cffca185c0854075e07969e36 \
             check-config /workspace/alertmanager/alertmanager.yml
           docker run --rm --entrypoint amtool \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
-            prom/alertmanager:v0.35.1 \
+            prom/alertmanager:v0.35.1@sha256:4e3d029e69c7f61dd53a2b31a3dc427a2b81736cffca185c0854075e07969e36 \
             check-config /workspace/alertmanager/alertmanager.telegram.example.yml
+          docker run --rm --entrypoint amtool \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            prom/alertmanager:v0.35.1@sha256:4e3d029e69c7f61dd53a2b31a3dc427a2b81736cffca185c0854075e07969e36 \
+            check-config /workspace/alertmanager/alertmanager.shared-demo.yml
+
+      - name: Validate shared demo Compose configuration
+        env:
+          SHARED_GRAFANA_ADMIN_USER: ci-admin
+          SHARED_GRAFANA_PASSWORD_FILE: /tmp/ximiowatch-ci-grafana-password
+        run: docker compose -f docker-compose.shared-demo.yml config -q
